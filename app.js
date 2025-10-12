@@ -41,18 +41,21 @@
     ul.innerHTML = items.map(t=>{
       const amountClass = t.type === 'income' ? 'income' : 'expense';
       const sign = t.type === 'income' ? '' : '-';
-      const claimedBadge = t.claimed ? '<span class="badge success">已請款</span>' : '';
       const base = toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1);
       const amountText = `${t.currency||'TWD'} ${formatAmount(t.amount)}`;
       const claimText = (Number(t.claimAmount)||0) > 0 ? `<br><small>請款 ${t.currency||'TWD'} ${formatAmount(t.claimAmount)}</small>` : '';
       const emo = t.emotion ? `<div class="emotion">情緒：${t.emotion}${t.motivation?`｜動機：${t.motivation}`:''}</div>` : (t.motivation?`<div class="emotion">動機：${t.motivation}</div>`:'');
+      const claimBadge = (t.type==='expense')
+        ? (t.claimed ? '<span class="badge success">已請款</span>' : '<span class="badge pending">未請款</span>')
+        : '';
       return `<li class="tx-item" data-id="${t.id}">
         <div>
-          <div>${t.note||'(無備註)'}・<small>${t.categoryName||t.categoryId}</small> ${claimedBadge}</div>${emo}
+          <div>${t.note||'(無備註)'}・<small>${t.categoryName||t.categoryId}</small> ${claimBadge}</div>${emo}
           <small>${t.date}</small>
         </div>
         <div class="tx-amount ${amountClass}">${sign}$${formatAmount(base)}<br><small>${amountText}</small>${claimText}</div>
         <div class="tx-actions">
+          <button class="ghost" data-action="toggle-claim">${t.claimed ? '標記未請款' : '標記已請款'}</button>
           <button class="ghost" data-action="repeat">重複</button>
           <button class="ghost" data-action="edit">編輯</button>
           <button class="ghost danger" data-action="delete">刪除</button>
@@ -130,6 +133,8 @@
   function filterAndRender(){
     const q = $('#searchInput').value.trim().toLowerCase();
     const type = $('#filterType').value;
+    const onlyUnclaimed = $('#filterUnclaimed')?.checked;
+    const sortUnclaimedFirst = $('#sortUnclaimedFirst')?.checked;
     DB.getTransactions().then(items=>{
       let filtered = items;
       if(type!=='all') filtered = filtered.filter(t=>t.type===type);
@@ -138,6 +143,18 @@
         filtered = filtered.filter(t=>
           (t.note||'').toLowerCase().includes(q) || (t.categoryName||t.categoryId||'').toLowerCase().includes(q)
         );
+      }
+      if(onlyUnclaimed){
+        // 視為：支出且未請款（claimed 僅在明確為 true 才視為已請款）
+        filtered = filtered.filter(t=> t.type==='expense' && t.claimed !== true);
+      }
+      if(sortUnclaimedFirst){
+        filtered = [...filtered].sort((a,b)=>{
+          const au = (a.type==='expense' && a.claimed !== true) ? 1 : 0;
+          const bu = (b.type==='expense' && b.claimed !== true) ? 1 : 0;
+          if(bu!==au) return bu-au; // unclaimed first
+          return (b.date||'').localeCompare(a.date||'');
+        });
       }
       renderTransactions(filtered);
     });
@@ -178,6 +195,8 @@
 
     $('#searchInput').addEventListener('input', filterAndRender);
     $('#filterType').addEventListener('change', filterAndRender);
+    $('#filterUnclaimed')?.addEventListener('change', filterAndRender);
+    $('#sortUnclaimedFirst')?.addEventListener('change', filterAndRender);
 
     $('#manageCategoriesBtn').addEventListener('click', ()=>{
       $('#categoryDialog').showModal();
@@ -205,6 +224,13 @@
       if(!btn) return;
       const li = e.target.closest('li[data-id]');
       const id = li?.dataset.id;
+      if(btn.dataset.action==='toggle-claim' && id){
+        const tx = await DB.getTransactionById(id);
+        if(!tx) return;
+        await DB.updateTransaction(id, { claimed: tx.claimed ? false : true });
+        refresh();
+        return;
+      }
       if(btn.dataset.action==='repeat' && id){
         const tx = await DB.getTransactionById(id);
         if(!tx) return;

@@ -134,6 +134,14 @@
             <option value="income">收入</option>
             <option value="expense">支出</option>
           </select>
+          <label class="inline" style="gap:6px">
+            <input id="filterUnclaimed" type="checkbox">
+            <small>只看未請款</small>
+          </label>
+          <label class="inline" style="gap:6px">
+            <input id="sortUnclaimedFirst" type="checkbox">
+            <small>未請款置頂</small>
+          </label>
         </div>
       </div>
       <ul id="txList" class="tx-list" aria-live="polite"></ul>
