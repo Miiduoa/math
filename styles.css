@@ -83,7 +83,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .app-header,.app-footer{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--glass-border);background:var(--glass-bg-strong);backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));box-shadow:var(--shadow);position:relative}
 .app-header::before,.app-footer::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--glass-highlight),transparent 40%);opacity:.35}
 .app-header::after,.app-footer::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 1px 0 var(--glass-innerline)}
-.app-footer{border-top:1px solid var(--border);border-bottom:0;justify-content:center}
+.app-footer{border-top:1px solid var(--border);border-bottom:0;justify-content:center;position:fixed;left:0;right:0;bottom:env(safe-area-inset-bottom);z-index:40;padding:8px 16px;background:transparent;pointer-events:none}
 .container{max-width:960px;margin:16px auto;padding:0 12px;display:grid;gap:16px}
 .card{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:var(--radius-lg);padding:16px;box-shadow:var(--shadow);backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));position:relative}
 .card::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--glass-highlight),transparent 35%);opacity:.28}
@@ -182,14 +182,17 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
   position:fixed;
   left:50%;
   transform:translateX(-50%);
-  bottom:calc(env(safe-area-inset-bottom) + 12px);
+  bottom:calc(env(safe-area-inset-bottom) + 48px);
   z-index:50;
 }
 @supports (padding: max(0px)){
-  .tabs.bottom{ bottom: max(12px, env(safe-area-inset-bottom)); }
+  .tabs.bottom{ bottom: max(48px, env(safe-area-inset-bottom)); }
 }
 /* Ensure content not hidden by bottom tabs */
-main.container{ padding-bottom: 88px; }
+main.container{ padding-bottom: calc(140px + env(safe-area-inset-bottom)); }
+
+/* Lift footer text above fixed bottom tabs */
+.app-footer{ padding-bottom: 8px; }
 
 /* iOS-style Switch for all checkboxes */
 input[type="checkbox"]{
