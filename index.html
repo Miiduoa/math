@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0ea5e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+  <title>個人記帳系統</title>
+  <link rel="stylesheet" href="./styles.css?v=ios-glass-20251012-1">
+</head>
+<body>
+  <header class="app-header">
+    <h1>個人記帳系統</h1>
+    <div class="header-actions">
+      <button id="syncBtn" class="ghost" title="與伺服器同步">同步</button>
+      <button id="settingsBtn" class="ghost" title="設定與目標">設定</button>
+      <button id="exportJsonBtn" class="ghost" title="匯出所有資料">匯出</button>
+      <label class="import-label">
+        <input id="importJsonInput" type="file" accept="application/json" hidden>
+        <span class="ghost" title="匯入資料">匯入</span>
+      </label>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs bottom">
+      <button class="tab-btn active" data-tab-target="ledger">記帳</button>
+      <button class="tab-btn" data-tab-target="stats">統計</button>
+      <button class="tab-btn" data-tab-target="calendar">月曆</button>
+      <button class="tab-btn" data-tab-target="assistant">助理</button>
+    </nav>
+    <section class="card" data-tab="ledger">
+      <h2>新增交易</h2>
+      <form id="txForm" autocomplete="off">
+        <div class="inline" style="justify-content:flex-end; margin-bottom:8px">
+          <button id="toggleAdvancedBtn" type="button" class="ghost">更多選項</button>
+        </div>
+        <div class="grid">
+          <div class="field">
+            <label for="txDate">日期</label>
+            <input id="txDate" name="date" type="date" required>
+          </div>
+          <div class="field">
+            <label for="txType">類型</label>
+            <select id="txType" name="type" required>
+              <option value="expense">支出</option>
+              <option value="income">收入</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="txCategory">分類</label>
+            <div class="inline">
+              <select id="txCategory" name="category" required></select>
+              <button id="manageCategoriesBtn" type="button" class="secondary">管理</button>
+            </div>
+          </div>
+          <div class="field adv">
+            <label for="txCurrency">幣別</label>
+            <select id="txCurrency" name="currency">
+              <option value="TWD">TWD</option>
+              <option value="USD">USD</option>
+              <option value="JPY">JPY</option>
+              <option value="EUR">EUR</option>
+              <option value="CNY">CNY</option>
+              <option value="HKD">HKD</option>
+            </select>
+          </div>
+          <div class="field adv">
+            <label for="txRate">匯率（換算至 TWD）</label>
+            <div class="inline">
+              <input id="txRate" name="rate" type="number" step="0.0001" inputmode="decimal" placeholder="1.0000" value="1">
+              <button id="updateRateBtn" type="button" class="ghost" title="從網路更新匯率">更新匯率</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="txAmount">實際金額</label>
+            <input id="txAmount" name="amount" type="number" step="0.01" inputmode="decimal" required placeholder="0.00">
+          </div>
+          <div class="field adv">
+            <label for="txClaimAmount">請款金額</label>
+            <input id="txClaimAmount" name="claimAmount" type="number" step="0.01" inputmode="decimal" placeholder="0.00">
+          </div>
+          <div class="field adv">
+            <label for="txClaimed">已請款</label>
+            <div class="inline">
+              <input id="txClaimed" type="checkbox">
+              <small>標記此筆交易已完成請款</small>
+            </div>
+          </div>
+          <div class="field adv">
+            <label for="txEmotion">情緒</label>
+            <select id="txEmotion">
+              <option value="">不標註</option>
+              <option value="happy">😊 開心</option>
+              <option value="neutral">😐 中立</option>
+              <option value="stress">😤 壓力</option>
+              <option value="sad">😞 低落</option>
+              <option value="regret">😣 後悔</option>
+            </select>
+          </div>
+          <div class="field adv">
+            <label for="txMotivation">消費動機</label>
+            <input id="txMotivation" type="text" placeholder="例如：社交、舒壓、健康、工作">
+          </div>
+          <div class="field field--full">
+            <label for="txNote">備註</label>
+            <input id="txNote" name="note" type="text" placeholder="選填">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="primary" id="submitBtn">新增</button>
+          <button type="button" class="ghost" id="cancelEditBtn" style="display:none">取消編輯</button>
+          <button type="reset" class="ghost">清除</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card" data-tab="ledger">
+      <h2>摘要</h2>
+      <div class="summary">
+        <div><span class="label">收入 (TWD)</span><span id="summaryIncome">$0</span></div>
+        <div><span class="label">支出 (TWD)</span><span id="summaryExpense">$0</span></div>
+        <div><span class="label">結餘 (TWD)</span><span id="summaryBalance">$0</span></div>
+      </div>
+    </section>
+
+    <section class="card" data-tab="ledger">
+      <div class="list-header">
+        <h2>交易紀錄</h2>
+        <div class="filters">
+          <input id="searchInput" type="search" placeholder="搜尋備註或分類…">
+          <select id="filterType">
+            <option value="all">全部</option>
+            <option value="income">收入</option>
+            <option value="expense">支出</option>
+          </select>
+        </div>
+      </div>
+      <ul id="txList" class="tx-list" aria-live="polite"></ul>
+    </section>
+
+    <section class="card" data-tab="stats">
+      <div class="list-header">
+        <h2>統計與圖表</h2>
+        <div class="filters">
+          <select id="statsMode">
+            <option value="monthly">每月 (當年度)</option>
+            <option value="yearly">每年 (全部)</option>
+          </select>
+        </div>
+      </div>
+      <div id="statsChart" class="chart"></div>
+    </section>
+
+    <section class="card" data-tab="assistant">
+      <h2>AI 助理與洞察</h2>
+      <div class="assistant">
+        <div class="inline">
+          <input id="nlpInput" type="text" placeholder="例如：支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款">
+          <button id="parseNlpBtn" class="secondary">解析</button>
+          <button id="quickAddNlpBtn" class="primary">快速新增</button>
+          <button id="openAIDialogBtn" class="ghost" title="打開 AI">AI</button>
+        </div>
+        <div class="assistant-row">
+          <span class="label">建議分類</span>
+          <div id="categorySuggestion" class="chips"></div>
+        </div>
+        <div class="assistant-row">
+          <span class="label">洞察</span>
+          <ul id="insightsList" class="insights"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" data-tab="calendar">
+      <div class="list-header">
+        <h2>月曆檢視</h2>
+        <div class="filters">
+          <button id="calPrevBtn" class="ghost" title="上一月">‹</button>
+          <div id="calMonthLabel" style="min-width:120px;text-align:center"></div>
+          <button id="calNextBtn" class="ghost" title="下一月">›</button>
+          <button id="clearDateFilterBtn" class="ghost" title="清除日期篩選">清除日期</button>
+        </div>
+      </div>
+      <div id="calendarGrid" class="calendar" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <!-- Quick Add FAB and Dialog -->
+  <button id="fabQuickAdd" class="fab primary" aria-label="快速記一筆">
+    <span class="icon" aria-hidden="true">＋</span>
+  </button>
+
+  <dialog id="quickAddDialog">
+    <form method="dialog" class="quick-form" id="quickAddForm">
+      <h3>快速記一筆</h3>
+      <div class="segmented" role="tablist" aria-label="類型">
+        <button type="button" class="seg-btn active" data-type="expense" id="quickTypeExpenseBtn" aria-selected="true">支出</button>
+        <button type="button" class="seg-btn" data-type="income" id="quickTypeIncomeBtn" aria-selected="false">收入</button>
+      </div>
+      <div class="grid" style="margin-top:8px">
+        <div class="field">
+          <label for="quickAmountInput">金額</label>
+          <input id="quickAmountInput" type="number" inputmode="decimal" step="0.01" placeholder="0.00" required>
+        </div>
+        <div class="field field--full">
+          <label>常用金額</label>
+          <div id="quickAmountChips" class="chips"></div>
+        </div>
+        <div class="field field--full">
+          <label>常用分類</label>
+          <div id="quickCategoryChips" class="chips"></div>
+        </div>
+        <div class="field field--full">
+          <label for="quickNoteInput">備註</label>
+          <input id="quickNoteInput" type="text" placeholder="選填">
+        </div>
+        <div class="field field--full">
+          <label>常用備註</label>
+          <div id="quickNoteChips" class="chips"></div>
+        </div>
+      </div>
+      <div class="inline" style="justify-content:space-between; margin-top:8px">
+        <label class="inline" style="gap:6px">
+          <input id="quickKeepOpenToggle" type="checkbox">
+          <small>連續新增</small>
+        </label>
+      </div>
+      <menu class="dialog-actions">
+        <button value="cancel" class="ghost">取消</button>
+        <button id="quickAddSubmitBtn" value="default" class="primary" type="submit">新增</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="aiDialog">
+    <form method="dialog" class="quick-form" id="aiForm">
+      <h3>AI 助理</h3>
+      <div class="field field--full">
+        <label for="aiMessage">詢問</label>
+        <input id="aiMessage" type="text" placeholder="想問什麼？例如：如何降低本月餐飲支出？" required>
+      </div>
+      <div id="aiAnswer" class="card" style="margin-top:8px; max-height:220px; overflow:auto"></div>
+      <menu class="dialog-actions">
+        <button value="cancel" class="ghost">關閉</button>
+        <button id="sendAIMessageBtn" value="default" class="primary" type="submit">送出</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="categoryDialog">
+    <form method="dialog" class="category-form" id="categoryForm">
+      <h3>分類管理</h3>
+      <div class="inline">
+        <input id="newCategoryInput" type="text" placeholder="新增分類名稱">
+        <button id="addCategoryBtn" type="button" class="primary">新增</button>
+      </div>
+      <ul id="categoryList" class="category-list"></ul>
+      <menu class="dialog-actions">
+        <button value="cancel" class="ghost">關閉</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" class="category-form" id="settingsForm">
+      <h3>設定</h3>
+      <div class="grid">
+        <div class="field field--full">
+          <label for="serverUrl">同步伺服器位址</label>
+          <input id="serverUrl" type="url" placeholder="例如：http://localhost:8787">
+        </div>
+        <div class="field">
+          <label for="monthlyBudget">每月預算 (TWD)</label>
+          <input id="monthlyBudget" type="number" step="0.01" inputmode="decimal" placeholder="0">
+        </div>
+        <div class="field">
+          <label for="savingsGoal">儲蓄目標 (TWD)</label>
+          <input id="savingsGoal" type="number" step="0.01" inputmode="decimal" placeholder="0">
+        </div>
+        <div class="field field--full">
+          <label for="nudgesToggle">助推與提醒</label>
+          <div class="inline">
+            <input id="nudgesToggle" type="checkbox">
+            <small>超支/未請款/連續紀錄提醒</small>
+          </div>
+        </div>
+        <div class="field field--full">
+          <label for="appearanceSelect">外觀</label>
+          <select id="appearanceSelect">
+            <option value="system">跟隨系統</option>
+            <option value="light">亮色</option>
+            <option value="dark-oled">暗色（OLED）</option>
+          </select>
+        </div>
+        <div class="field field--full">
+          <label>每分類預算 (TWD)</label>
+          <div id="categoryBudgetList" class="category-list"></div>
+        </div>
+      </div>
+      <menu class="dialog-actions">
+        <button id="saveSettingsBtn" value="default" class="primary" type="button">儲存</button>
+        <button value="cancel" class="ghost">關閉</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <footer class="app-footer">
+    <small>v0.1.0 • 本地端儲存 • 將支援 LINE Bot</small>
+  </footer>
+
+  <script src="./db.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
+

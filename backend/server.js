@@ -1,0 +1,341 @@
+import http from 'node:http';
+import https from 'node:https';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Load local env variables from .env.local (if exists, non-production convenience)
+try{
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const envPath = path.join(__dirname, '.env.local');
+  if(fs.existsSync(envPath)){
+    const content = fs.readFileSync(envPath, 'utf-8');
+    content.split(/\r?\n/).forEach((line)=>{
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+      if(!m) return;
+      const key = m[1];
+      let val = m[2];
+      if((val.startsWith('"') && val.endsWith('"')) || (val.startsWith('\'') && val.endsWith('\''))){
+        val = val.slice(1,-1);
+      }
+      if(!process.env[key]) process.env[key] = val;
+    });
+  }
+}catch(_){ /* ignore */ }
+
+const PORT = Number(process.env.PORT || 8787);
+const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
+
+// In-memory store (demo only)
+const store = {
+  categories: [],
+  transactions: [],
+  settings: { key: 'app', baseCurrency: 'TWD', monthlyBudgetTWD: 0, savingsGoalTWD: 0, nudges: true, categoryBudgets: {} },
+  model: [] // [{ word, counts: { catId: number } }]
+};
+
+function setCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Line-Signature');
+}
+
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > 1_000_000) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      resolve(raw);
+    });
+    req.on('error', reject);
+  });
+}
+
+function verifyLineSignature(rawBody, signature) {
+  if (!LINE_CHANNEL_SECRET) return true; // skip if not configured
+  if (!signature) return false;
+  const hmac = crypto.createHmac('sha256', LINE_CHANNEL_SECRET);
+  hmac.update(rawBody);
+  const digest = hmac.digest('base64');
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    setCors(res);
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      return res.end();
+    }
+
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const path = url.pathname;
+    if (req.method === 'POST' && path === '/api/ai') {
+      const raw = await parseBody(req);
+      const body = JSON.parse(raw.toString('utf-8') || '{}');
+      const { messages = [], context = {} } = body || {};
+
+      const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+      // Fallback: simple heuristic response if no key configured
+      if (!OPENAI_API_KEY) {
+        const reply = heuristicReply(messages, context);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true, provider: 'heuristic', reply }));
+      }
+
+      // Proxy to OpenAI-compatible API
+      const payload = {
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
+          { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
+          ...messages
+        ],
+        temperature: 0.4
+      };
+      const data = await fetchJson(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      const reply = data?.choices?.[0]?.message?.content || '';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
+    }
+
+    if (req.method === 'GET' && path === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+
+    // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
+    if (req.method === 'GET' && (path === '/' || path === '/index.html' || path === '/styles.css' || path === '/app.js' || path === '/db.js')) {
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = path.dirname(__filename);
+      const rootDir = path.resolve(__dirname, '..');
+      const filePath = path === '/' ? path.join(rootDir, 'index.html') : path.join(rootDir, path.slice(1));
+      try{
+        const ext = path === '/' ? '.html' : path.extname(filePath);
+        const mime = ext === '.html' ? 'text/html; charset=utf-8'
+          : ext === '.css' ? 'text/css; charset=utf-8'
+          : ext === '.js' ? 'application/javascript; charset=utf-8'
+          : 'text/plain; charset=utf-8';
+        const content = fs.readFileSync(filePath);
+        res.writeHead(200, { 'Content-Type': mime });
+        return res.end(content);
+      }catch(_){ /* fallthrough to API/404 */ }
+    }
+
+    // Categories
+    if (req.method === 'GET' && path === '/api/categories') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(store.categories));
+    }
+    if (req.method === 'POST' && path === '/api/categories') {
+      const raw = await parseBody(req);
+      const { name = '' } = JSON.parse(raw.toString('utf-8') || '{}');
+      const id = String(name).trim().toLowerCase().replace(/\s+/g,'-');
+      if(!id){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'invalid_name' })); }
+      if(store.categories.some(c=>c.id===id)){ res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, category: store.categories.find(c=>c.id===id) })); }
+      const cat = { id, name: String(name).trim() };
+      store.categories.push(cat);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, category: cat }));
+    }
+    if (req.method === 'DELETE' && path.startsWith('/api/categories/')){
+      const id = decodeURIComponent(path.split('/').pop()||'');
+      if(store.transactions.some(t=>t.categoryId===id)){
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'in_use' }));
+      }
+      const before = store.categories.length;
+      store.categories = store.categories.filter(c=>c.id!==id);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: store.categories.length<before }));
+    }
+
+    // Transactions
+    if (req.method === 'GET' && path === '/api/transactions'){
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(store.transactions));
+    }
+    if (req.method === 'POST' && path === '/api/transactions'){
+      const raw = await parseBody(req);
+      const payload = JSON.parse(raw.toString('utf-8') || '{}');
+      const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
+      const rec = { id, ...payload };
+      store.transactions.unshift(rec);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, transaction: rec }));
+    }
+    if (req.method === 'GET' && path.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(path.split('/').pop()||'');
+      const rec = store.transactions.find(t=>t.id===id) || null;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, transaction: rec }));
+    }
+    if (req.method === 'PUT' && path.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(path.split('/').pop()||'');
+      const raw = await parseBody(req);
+      const patch = JSON.parse(raw.toString('utf-8') || '{}');
+      const idx = store.transactions.findIndex(t=>t.id===id);
+      if(idx<0){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      store.transactions[idx] = { ...store.transactions[idx], ...patch };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, transaction: store.transactions[idx] }));
+    }
+    if (req.method === 'DELETE' && path.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(path.split('/').pop()||'');
+      const before = store.transactions.length;
+      store.transactions = store.transactions.filter(t=>t.id!==id);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: store.transactions.length<before }));
+    }
+
+    // Settings
+    if (req.method === 'GET' && path === '/api/settings'){
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(store.settings));
+    }
+    if (req.method === 'PUT' && path === '/api/settings'){
+      const raw = await parseBody(req);
+      const patch = JSON.parse(raw.toString('utf-8') || '{}');
+      store.settings = { ...store.settings, ...patch };
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(store.settings));
+    }
+
+    // Model
+    if (req.method === 'POST' && path === '/api/model/update'){
+      const raw = await parseBody(req);
+      const { note='', categoryId='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+      for(const w of words){
+        let rec = store.model.find(r=>r.word===w);
+        if(!rec){ rec={ word:w, counts:{} }; store.model.push(rec); }
+        rec.counts[categoryId] = (rec.counts[categoryId]||0) + 1;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true }));
+    }
+    if (req.method === 'POST' && path === '/api/model/suggest'){
+      const raw = await parseBody(req);
+      const { note='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+      const scores = {};
+      for(const w of words){
+        const rec = store.model.find(r=>r.word===w);
+        if(rec && rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0);} }
+      }
+      let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){ bestScore=v; best=k; } }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, categoryId: best }));
+    }
+
+    if (req.method === 'GET' && path === '/api/sync/export') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(store));
+    }
+
+    if (req.method === 'POST' && path === '/api/sync/import') {
+      const raw = await parseBody(req);
+      const data = JSON.parse(raw.toString('utf-8') || '{}');
+      if (!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: false, error: 'invalid payload' }));
+      }
+      store.categories = data.categories;
+      store.transactions = data.transactions;
+      if (data.settings) store.settings = data.settings;
+      if (Array.isArray(data.model)) store.model = data.model;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+
+    if (req.method === 'POST' && path === '/line/webhook') {
+      const raw = await parseBody(req);
+      const sig = req.headers['x-line-signature'];
+      if (!verifyLineSignature(raw, typeof sig === 'string' ? sig : '')) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: false, error: 'signature invalid' }));
+      }
+      let body = {};
+      try { body = JSON.parse(raw.toString('utf-8') || '{}'); } catch {}
+      // Minimal echo-like handling (no reply token usage here; just acknowledge)
+      const events = Array.isArray(body.events) ? body.events : [];
+      console.log('LINE events:', events.map(e => ({ type: e.type, text: e.message?.text })).slice(0, 3));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: false, error: 'server_error' }));
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`[ledger-backend] Listening on http://localhost:${PORT}`);
+});
+
+function heuristicReply(messages, context){
+  try{
+    const lastUser = (messages||[]).filter(m=>m&&m.role==='user').slice(-1)[0]?.content || '';
+    const txs = Array.isArray(context?.transactions) ? context.transactions : [];
+    let income=0, expense=0;
+    for(const t of txs){
+      const type = t.type||'';
+      const amt = Number(t.amount)||0;
+      if(type==='income') income+=amt; else if(type==='expense') expense+=amt;
+    }
+    const balance = income-expense;
+    return `這是離線建議回覆（未設定 API 金鑰）。最近共 ${txs.length} 筆，收入 $${income.toFixed(2)}、支出 $${expense.toFixed(2)}、結餘 $${balance.toFixed(2)}。\n你的問題：「${lastUser}」。建議：設定每月預算與分類預算，並使用快速記一筆降低阻力。`;
+  }catch{
+    return '無法產生建議，請稍後再試或設定 AI 供應商。';
+  }
+}
+
+function fetchJson(url, opts){
+  return new Promise((resolve, reject)=>{
+    const u = new URL(url);
+    const req = https.request({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: opts?.method||'GET',
+      headers: opts?.headers||{}
+    }, (resp)=>{
+      const chunks=[];
+      resp.on('data', c=>chunks.push(c));
+      resp.on('end', ()=>{
+        try{ resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')||'{}')); }
+        catch(err){ reject(err); }
+      });
+    });
+    req.on('error', reject);
+    if(opts?.body){ req.write(opts.body); }
+    req.end();
+  });
+}
+
+
