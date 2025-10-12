@@ -85,7 +85,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && reqPath === '/api/ai') {
       const raw = await parseBody(req);
       const body = JSON.parse(raw.toString('utf-8') || '{}');
-      const { messages = [], context = {} } = body || {};
+      const { messages = [], context = {}, mode = 'chat' } = body || {};
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
@@ -101,7 +101,10 @@ const server = http.createServer(async (req, res) => {
       // Proxy to OpenAI-compatible API
       const payload = {
         model: OPENAI_MODEL,
-        messages: [
+        messages: (mode==='struct') ? [
+          { role: 'system', content: '你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。只輸出 JSON，不要其他文字。' },
+          { role: 'user', content: messages?.[0]?.content || '' }
+        ] : [
           { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
           { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
           ...messages
@@ -121,6 +124,14 @@ const server = http.createServer(async (req, res) => {
           body: JSON.stringify(payload)
         }, 20000);
         const reply = data?.choices?.[0]?.message?.content || '';
+        // struct 模式：嘗試解析 JSON
+        if(mode==='struct'){
+          try{
+            const json = JSON.parse(reply);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ ok:true, provider:'openai', parsed: json }));
+          }catch(_){ /* fallthrough to plain text */ }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
       }catch(err){

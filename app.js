@@ -564,6 +564,8 @@
     const aiForm = $('#aiForm');
     const aiMessage = $('#aiMessage');
     const aiAnswer = $('#aiAnswer');
+    const aiAutoAddToggle = $('#aiAutoAddToggle');
+    const aiPreview = $('#aiPreview');
     let aiAbort = null; // AbortController for in-flight AI requests
     openAIDialogBtn?.addEventListener('click', ()=>{
       aiAnswer.innerHTML = '';
@@ -640,13 +642,40 @@
         // Prefer same-origin if available; fall back to candidate (user-configured)
         const base = (originOk || candidate).replace(/\/$/,'');
         aiAbort = new AbortController();
+        // 先請 AI 進行結構化解析
         const resp = await fetch(`${base.replace(/\/$/,'')}/api/ai`,{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ messages:[{ role:'user', content:text }], context }),
+          body: JSON.stringify({ messages:[{ role:'user', content:text }], context, mode:'struct' }),
           signal: aiAbort.signal
         });
         const data = await resp.json().catch(()=>({ ok:false, error:'invalid_json' }));
-        if(!resp.ok || data?.ok===false){
+        if(resp.ok && data?.parsed){
+          // 顯示預覽，依開關自動新增
+          const p = data.parsed;
+          aiPreview.style.display='block';
+          aiPreview.innerHTML = `<div>解析結果：${p.type||'expense'} $${p.amount} ${p.currency||'TWD'} ・ ${p.categoryName||''} ・ ${p.date||today()}<br><small>${(p.note||'').slice(0,100)}</small></div>`;
+          if(aiAutoAddToggle?.checked){
+            const cats = await DB.getCategories();
+            const hit = (p.categoryName && cats.find(c=> String(c.name).toLowerCase()===String(p.categoryName).toLowerCase()))?.id;
+            const payload = {
+              date: p.date || today(),
+              type: p.type || 'expense',
+              categoryId: hit || $('#txCategory')?.value || '',
+              currency: p.currency || 'TWD', rate: Number(p.rate)||1,
+              amount: Number(p.amount)||0,
+              claimAmount: Number(p.claimAmount)||0,
+              claimed: p.claimed===true,
+              note: (p.note||'').trim()
+            };
+            if(payload.categoryId && payload.type && Number.isFinite(payload.amount) && payload.amount>0){
+              await DB.addTransaction(payload);
+              refresh();
+              aiAnswer.textContent = '已自動記帳';
+              setTimeout(()=>{ try{ aiDialog.close(); }catch(_){ } }, 600);
+              return;
+            }
+          }
+        } else if(!resp.ok || data?.ok===false){
           // fallback：本地解析直接新增
           const ok = await autoAddFromText(text);
           if(!ok){ aiAnswer.textContent = `AI 失敗：${data?.error||resp.status}`; }

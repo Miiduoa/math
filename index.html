@@ -248,6 +248,10 @@
         <label for="aiMessage">詢問</label>
         <input id="aiMessage" type="text" placeholder="想問什麼？例如：如何降低本月餐飲支出？" required>
       </div>
+      <div class="inline" style="gap:12px; margin:6px 0 0">
+        <label class="inline" style="gap:6px"><input id="aiAutoAddToggle" type="checkbox"><small>自動記帳</small></label>
+      </div>
+      <div id="aiPreview" class="card" style="margin-top:8px; display:none"></div>
       <div id="aiAnswer" class="card" style="margin-top:8px; max-height:220px; overflow:auto"></div>
       <menu class="dialog-actions">
         <button id="aiCancelBtn" class="ghost" type="button">關閉</button>
