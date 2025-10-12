@@ -81,8 +81,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    const path = url.pathname;
-    if (req.method === 'POST' && path === '/api/ai') {
+    const reqPath = url.pathname;
+    if (req.method === 'POST' && reqPath === '/api/ai') {
       const raw = await parseBody(req);
       const body = JSON.parse(raw.toString('utf-8') || '{}');
       const { messages = [], context = {} } = body || {};
@@ -121,19 +121,19 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
     }
 
-    if (req.method === 'GET' && path === '/health') {
+    if (req.method === 'GET' && reqPath === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true }));
     }
 
     // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
-    if (req.method === 'GET' && (path === '/' || path === '/index.html' || path === '/styles.css' || path === '/app.js' || path === '/db.js')) {
+    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/index.html' || reqPath === '/styles.css' || reqPath === '/app.js' || reqPath === '/db.js')) {
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = path.dirname(__filename);
       const rootDir = path.resolve(__dirname, '..');
-      const filePath = path === '/' ? path.join(rootDir, 'index.html') : path.join(rootDir, path.slice(1));
+      const filePath = reqPath === '/' ? path.join(rootDir, 'index.html') : path.join(rootDir, reqPath.slice(1));
       try{
-        const ext = path === '/' ? '.html' : path.extname(filePath);
+        const ext = reqPath === '/' ? '.html' : path.extname(filePath);
         const mime = ext === '.html' ? 'text/html; charset=utf-8'
           : ext === '.css' ? 'text/css; charset=utf-8'
           : ext === '.js' ? 'application/javascript; charset=utf-8'
@@ -145,11 +145,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Categories
-    if (req.method === 'GET' && path === '/api/categories') {
+    if (req.method === 'GET' && reqPath === '/api/categories') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(store.categories));
     }
-    if (req.method === 'POST' && path === '/api/categories') {
+    if (req.method === 'POST' && reqPath === '/api/categories') {
       const raw = await parseBody(req);
       const { name = '' } = JSON.parse(raw.toString('utf-8') || '{}');
       const id = String(name).trim().toLowerCase().replace(/\s+/g,'-');
@@ -160,8 +160,8 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true, category: cat }));
     }
-    if (req.method === 'DELETE' && path.startsWith('/api/categories/')){
-      const id = decodeURIComponent(path.split('/').pop()||'');
+    if (req.method === 'DELETE' && reqPath.startsWith('/api/categories/')){
+      const id = decodeURIComponent(reqPath.split('/').pop()||'');
       if(store.transactions.some(t=>t.categoryId===id)){
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:false, error:'in_use' }));
@@ -173,11 +173,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Transactions
-    if (req.method === 'GET' && path === '/api/transactions'){
+    if (req.method === 'GET' && reqPath === '/api/transactions'){
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(store.transactions));
     }
-    if (req.method === 'POST' && path === '/api/transactions'){
+    if (req.method === 'POST' && reqPath === '/api/transactions'){
       const raw = await parseBody(req);
       const payload = JSON.parse(raw.toString('utf-8') || '{}');
       const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
@@ -186,14 +186,14 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true, transaction: rec }));
     }
-    if (req.method === 'GET' && path.startsWith('/api/transactions/')){
-      const id = decodeURIComponent(path.split('/').pop()||'');
+    if (req.method === 'GET' && reqPath.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const rec = store.transactions.find(t=>t.id===id) || null;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true, transaction: rec }));
     }
-    if (req.method === 'PUT' && path.startsWith('/api/transactions/')){
-      const id = decodeURIComponent(path.split('/').pop()||'');
+    if (req.method === 'PUT' && reqPath.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
       const idx = store.transactions.findIndex(t=>t.id===id);
@@ -202,8 +202,8 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true, transaction: store.transactions[idx] }));
     }
-    if (req.method === 'DELETE' && path.startsWith('/api/transactions/')){
-      const id = decodeURIComponent(path.split('/').pop()||'');
+    if (req.method === 'DELETE' && reqPath.startsWith('/api/transactions/')){
+      const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const before = store.transactions.length;
       store.transactions = store.transactions.filter(t=>t.id!==id);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -211,11 +211,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Settings
-    if (req.method === 'GET' && path === '/api/settings'){
+    if (req.method === 'GET' && reqPath === '/api/settings'){
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(store.settings));
     }
-    if (req.method === 'PUT' && path === '/api/settings'){
+    if (req.method === 'PUT' && reqPath === '/api/settings'){
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
       store.settings = { ...store.settings, ...patch };
@@ -224,7 +224,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Model
-    if (req.method === 'POST' && path === '/api/model/update'){
+    if (req.method === 'POST' && reqPath === '/api/model/update'){
       const raw = await parseBody(req);
       const { note='', categoryId='' } = JSON.parse(raw.toString('utf-8')||'{}');
       const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -236,7 +236,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true }));
     }
-    if (req.method === 'POST' && path === '/api/model/suggest'){
+    if (req.method === 'POST' && reqPath === '/api/model/suggest'){
       const raw = await parseBody(req);
       const { note='' } = JSON.parse(raw.toString('utf-8')||'{}');
       const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -250,12 +250,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok:true, categoryId: best }));
     }
 
-    if (req.method === 'GET' && path === '/api/sync/export') {
+    if (req.method === 'GET' && reqPath === '/api/sync/export') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(store));
     }
 
-    if (req.method === 'POST' && path === '/api/sync/import') {
+    if (req.method === 'POST' && reqPath === '/api/sync/import') {
       const raw = await parseBody(req);
       const data = JSON.parse(raw.toString('utf-8') || '{}');
       if (!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) {
@@ -270,7 +270,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true }));
     }
 
-    if (req.method === 'POST' && path === '/line/webhook') {
+    if (req.method === 'POST' && reqPath === '/line/webhook') {
       const raw = await parseBody(req);
       const sig = req.headers['x-line-signature'];
       if (!verifyLineSignature(raw, typeof sig === 'string' ? sig : '')) {
