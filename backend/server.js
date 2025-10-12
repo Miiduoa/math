@@ -108,7 +108,10 @@ const server = http.createServer(async (req, res) => {
         ],
         temperature: 0.4
       };
-      const data = await fetchJson(`${OPENAI_BASE_URL}/chat/completions`, {
+      const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
+      const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+      const endpoint = `${apiBase}/chat/completions`;
+      const data = await fetchJson(endpoint, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${OPENAI_API_KEY}`,
