@@ -538,13 +538,31 @@
     const aiForm = $('#aiForm');
     const aiMessage = $('#aiMessage');
     const aiAnswer = $('#aiAnswer');
+    let aiAbort = null; // AbortController for in-flight AI requests
     openAIDialogBtn?.addEventListener('click', ()=>{
       aiAnswer.innerHTML = '';
       aiMessage.value = '';
       aiDialog.showModal();
     });
+    const aiCancelBtn = $('#aiCancelBtn');
+    aiCancelBtn?.addEventListener('click', ()=>{
+      try{ aiAbort?.abort(); }catch(_){ }
+      aiDialog.close();
+    });
+    // click backdrop to close
+    aiDialog?.addEventListener('click', (e)=>{
+      if(e.target === aiDialog){ try{ aiAbort?.abort(); }catch(_){ } aiDialog.close(); }
+    });
+    // ESC to close (cancel event)
+    aiDialog?.addEventListener('cancel', ()=>{ try{ aiAbort?.abort(); }catch(_){ } });
     aiForm?.addEventListener('submit', async (e)=>{
       e.preventDefault();
+      // If the submitter is the cancel button, just close the dialog
+      const submitter = e.submitter;
+      if(submitter && submitter.value === 'cancel'){
+        aiDialog.close();
+        return;
+      }
       const text = aiMessage.value.trim();
       if(!text) return;
       aiAnswer.textContent = '思考中…';
@@ -553,17 +571,70 @@
         transactions: await DB.getTransactions(),
         categories: await DB.getCategories()
       };
+      async function autoAddFromText(t){
+        const parsed = parseNlp(t);
+        // require amount
+        if(!Number.isFinite(parsed.amount)) return false;
+        let catId = parsed.categoryId || '';
+        if(!catId){
+          try{
+            // 1) model-based suggestion
+            catId = await DB.suggestCategoryFromNote?.(parsed.note||'') || '';
+            // 2) fuzzy match category name contained in note/text
+            if(!catId){
+              const cats = await DB.getCategories();
+              const noteLower = String(parsed.note||t||'').toLowerCase();
+              const hit = cats.find(c=> noteLower.includes(String(c.name||'').toLowerCase()));
+              if(hit) catId = hit.id;
+            }
+          }catch(_){ /* ignore */ }
+        }
+        const payload = {
+          date: parsed.date || today(),
+          type: parsed.type || ($('#txType')?.value || 'expense'),
+          categoryId: catId || ($('#txCategory')?.value || ''),
+          currency: parsed.currency || 'TWD',
+          rate: Number(parsed.rate)||1,
+          amount: Number(parsed.amount),
+          claimAmount: Number(parsed.claimAmount)||0,
+          claimed: typeof parsed.claimed==='boolean' ? parsed.claimed : false,
+          note: (parsed.note||'').trim()
+        };
+        if(!payload.categoryId || !payload.type || !Number.isFinite(payload.amount)) return false;
+        await DB.addTransaction(payload);
+        refresh();
+        aiAnswer.textContent = `已新增：${payload.type==='income'?'收入':'支出'} $${formatAmount(payload.amount)}（${payload.currency||'TWD'}）`;
+        setTimeout(()=>{ try{ aiDialog.close(); }catch(_){ } }, 600);
+        return true;
+      }
       try{
-        const serverUrl = $('#serverUrl')?.value || (await DB.getSettings?.())?.serverUrl || '';
-        const base = serverUrl || location.origin;
+        const s = await DB.getSettings?.();
+        const candidate = ($('#serverUrl')?.value || s?.serverUrl || '').trim();
+        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
+        // Prefer same-origin if available; fall back to candidate (user-configured)
+        const base = (originOk || candidate).replace(/\/$/,'');
+        aiAbort = new AbortController();
         const resp = await fetch(`${base.replace(/\/$/,'')}/api/ai`,{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ messages:[{ role:'user', content:text }], context })
+          body: JSON.stringify({ messages:[{ role:'user', content:text }], context }),
+          signal: aiAbort.signal
         });
-        const data = await resp.json();
-        aiAnswer.textContent = data?.reply || '沒有回覆';
+        const data = await resp.json().catch(()=>({ ok:false, error:'invalid_json' }));
+        if(!resp.ok || data?.ok===false){
+          // fallback：本地解析直接新增
+          const ok = await autoAddFromText(text);
+          if(!ok){ aiAnswer.textContent = `AI 失敗：${data?.error||resp.status}`; }
+          return; 
+        }
+        // 如果供應商回覆文字，仍嘗試本地解析新增（以達成你要的自動記帳）
+        const ok = await autoAddFromText(text);
+        if(!ok){ aiAnswer.textContent = data?.reply || '沒有回覆'; }
       }catch(err){
-        aiAnswer.textContent = '呼叫 AI 失敗，請稍後重試';
+        // 網路錯誤時改用本地解析
+        const ok = await autoAddFromText(text);
+        if(!ok){ aiAnswer.textContent = `呼叫 AI 失敗：${String(err?.message||err)}`; }
+      }finally{
+        aiAbort = null;
       }
     });
     // Category suggestion when note changes

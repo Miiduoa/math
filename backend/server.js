@@ -111,17 +111,22 @@ const server = http.createServer(async (req, res) => {
       const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
       const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
       const endpoint = `${apiBase}/chat/completions`;
-      const data = await fetchJson(endpoint, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-      const reply = data?.choices?.[0]?.message?.content || '';
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
+      try{
+        const data = await fetchJson(endpoint, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        }, 20000);
+        const reply = data?.choices?.[0]?.message?.content || '';
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
+      }catch(err){
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'ai_provider', detail: String(err?.message||err) }));
+      }
     }
 
     if (req.method === 'GET' && reqPath === '/health') {
@@ -319,7 +324,7 @@ function heuristicReply(messages, context){
   }
 }
 
-function fetchJson(url, opts){
+function fetchJson(url, opts, timeoutMs=15000){
   return new Promise((resolve, reject)=>{
     const u = new URL(url);
     const req = https.request({
@@ -336,6 +341,8 @@ function fetchJson(url, opts){
       });
     });
     req.on('error', reject);
+    const to = setTimeout(()=>{ try{ req.destroy(new Error('upstream timeout')); }catch(_){ } }, timeoutMs);
+    req.on('close', ()=>{ clearTimeout(to); });
     if(opts?.body){ req.write(opts.body); }
     req.end();
   });
