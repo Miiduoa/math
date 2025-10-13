@@ -2,6 +2,13 @@
   const $ = (sel, root=document) => root.querySelector(sel);
   const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
+  function showDialogSafe(dialog){
+    if(!dialog) return;
+    try{ dialog.showModal?.(); return; }catch(_){ }
+    try{ dialog.show?.(); return; }catch(_){ }
+    if(!dialog.open) dialog.setAttribute('open','');
+  }
+
   function formatAmount(n){
     const sign = n < 0 ? '-' : '';
     const v = Math.abs(Number(n)||0);
@@ -489,7 +496,7 @@
             </div>`).join('');
           }
         }catch(_){ /* ignore */ }
-        settingsDialog.showModal();
+        showDialogSafe(settingsDialog);
       });
     }
     // live preview when changing appearance select
