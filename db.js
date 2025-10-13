@@ -71,7 +71,7 @@
       getApp.onerror = ()=>resolve(false);
     });
     if(!exists){
-      sStore.put({ key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', serverUrl:'http://localhost:8787', categoryBudgets:{} });
+      sStore.put({ key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', serverUrl:'', categoryBudgets:{} });
     }
     return new Promise((resolve,reject)=>{
       tx.oncomplete = ()=>resolve(true);
@@ -373,11 +373,19 @@
 
   const remote = {
     base(){
+      // 優先使用同源（避免在雲端環境誤用過去本機的 localhost 設定）
+      try{
+        const origin = location && location.origin ? String(location.origin) : '';
+        if(origin && /^https?:\/\//.test(origin) && !/localhost|127\.0\.0\.1/.test(origin)){
+          return origin.replace(/\/$/,'');
+        }
+      }catch(_){ }
+      // 回退：使用使用者設定（例如本機開發）
       try{
         const saved = (localStorage.getItem('serverUrl')||'').trim();
         if(saved) return saved.replace(/\/$/,'');
       }catch(_){ }
-      // default to current origin if served by backend
+      // 最後回退：若無同源、無設定，嘗試使用 location.origin 或空字串
       try{ return location.origin; }catch(_){ return ''; }
     },
     async init(){ return true; },

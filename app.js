@@ -483,7 +483,7 @@
         $('#savingsGoal').value = s.savingsGoalTWD||0;
         $('#nudgesToggle').checked = !!s.nudges;
         if($('#appearanceSelect')) $('#appearanceSelect').value = s.appearance || 'system';
-        if($('#serverUrl')) $('#serverUrl').value = s.serverUrl || 'http://localhost:8787';
+        if($('#serverUrl')) $('#serverUrl').value = s.serverUrl || '';
         // render per-category budgets
         try{
           const list = $('#categoryBudgetList');
