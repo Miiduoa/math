@@ -739,7 +739,8 @@ const server = http.createServer(async (req, res) => {
               }
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
-            if(/^綁定$/.test(text)){
+            const normalized = text.replace(/\s+/g,'');
+            if(normalized==='綁定' || normalized==='绑定'){
               if(isDbEnabled() && lineUidRaw){
                 const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
                 const base = getBaseUrl(req) || '';
@@ -760,6 +761,10 @@ const server = http.createServer(async (req, res) => {
                   }
                 };
                 await lineReply(replyToken, [flex]);
+                continue;
+              } else {
+                // DB 未啟用或未取得使用者 ID，回覆指引
+                await lineReply(replyToken, [{ type:'text', text:'請先完成系統設定後再輸入「綁定」。如需協助請告知管理者。' }]);
                 continue;
               }
             }
