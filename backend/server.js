@@ -155,6 +155,15 @@ const server = http.createServer(async (req, res) => {
 
     // LINE Login start
     if (req.method === 'GET' && reqPath === '/auth/line/start'){
+      // guard: required envs
+      if(!LINE_LOGIN_CHANNEL_ID || !LINE_LOGIN_CHANNEL_SECRET || !LINE_LOGIN_REDIRECT_URI){
+        res.writeHead(500, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'line_login_env', missing: {
+          LINE_LOGIN_CHANNEL_ID: !LINE_LOGIN_CHANNEL_ID,
+          LINE_LOGIN_CHANNEL_SECRET: !LINE_LOGIN_CHANNEL_SECRET,
+          LINE_LOGIN_REDIRECT_URI: !LINE_LOGIN_REDIRECT_URI
+        }}));
+      }
       const state = crypto.randomBytes(12).toString('hex');
       const nonce = crypto.randomBytes(12).toString('hex');
       setCookie(res, 'linestate', createSigned(`${state}|${nonce}|${Date.now()}`), { maxAge: 600 });
@@ -165,6 +174,7 @@ const server = http.createServer(async (req, res) => {
       authz.searchParams.set('state', state);
       authz.searchParams.set('scope','profile openid');
       authz.searchParams.set('nonce', nonce);
+      try{ console.log('[line-login] authorize URL', authz.toString()); }catch(_){ }
       res.writeHead(302, { Location: authz.toString() });
       return res.end();
     }
@@ -178,6 +188,7 @@ const server = http.createServer(async (req, res) => {
       if(!parsed){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Invalid state'); }
       const [savedState] = parsed.split('|');
       if(!state || state!==savedState){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('State mismatch'); }
+      if(!code){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Missing code'); }
       // exchange token
       const tokenEndpoint = 'https://api.line.me/oauth2/v2.1/token';
       const form = new URLSearchParams();
@@ -189,13 +200,17 @@ const server = http.createServer(async (req, res) => {
       let tokenData=null;
       try{
         tokenData = await fetchJson(tokenEndpoint, { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: String(form) }, 15000);
-      }catch(err){ res.writeHead(502, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Token exchange failed'); }
+      }catch(err){
+        try{ console.error('[line-login] token error', err); }catch(_){ }
+        res.writeHead(502, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Token exchange failed');
+      }
       const accessToken = tokenData?.access_token||'';
+      if(!accessToken){ res.writeHead(502, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Missing access token'); }
       // fetch profile
       let profile=null;
       try{
         profile = await fetchJson('https://api.line.me/v2/profile', { headers:{ 'Authorization': `Bearer ${accessToken}` } }, 15000);
-      }catch(_){ profile=null; }
+      }catch(err){ try{ console.error('[line-login] profile error', err); }catch(_){ } profile=null; }
       const user = {
         id: profile?.userId || 'line:'+(tokenData?.id_token||'').slice(0,8),
         name: profile?.displayName || 'LINE User',
