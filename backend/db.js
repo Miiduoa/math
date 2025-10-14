@@ -29,12 +29,20 @@ async function initSchema(pool){
     id text primary key,
     name text not null
   );
+  -- global default settings (legacy; kept for compatibility)
   create table if not exists settings (
     key text primary key,
     data jsonb not null
   );
+  -- per-user settings
+  create table if not exists user_settings (
+    user_id text primary key,
+    data jsonb not null
+  );
+  -- transactions with optional user_id (indexed)
   create table if not exists transactions (
     id text primary key,
+    user_id text,
     date text not null,
     type text not null,
     category_id text not null references categories(id) on delete restrict,
@@ -47,9 +55,18 @@ async function initSchema(pool){
     motivation text default '',
     note text default ''
   );
+  create index if not exists idx_transactions_user on transactions(user_id);
+  -- global model (legacy)
   create table if not exists model_words (
     word text primary key,
     counts jsonb not null default '{}'::jsonb
+  );
+  -- per-user model
+  create table if not exists user_model_words (
+    user_id text not null,
+    word text not null,
+    counts jsonb not null default '{}'::jsonb,
+    primary key(user_id, word)
   );
   `);
   // seed settings and default categories
@@ -89,21 +106,30 @@ export const db = {
     await p.query('delete from categories where id=$1', [id]);
     return true;
   },
-  async getSettings(){
+  async getSettings(userId){
     const p = await getPool();
-    const r = await p.query('select data from settings where key=$1', ['app']);
-    return r.rows[0]?.data || { key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', categoryBudgets:{} };
+    if(userId){
+      const r = await p.query('select data from user_settings where user_id=$1', [userId]);
+      return r.rows[0]?.data || { key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', categoryBudgets:{} };
+    }else{
+      const r = await p.query('select data from settings where key=$1', ['app']);
+      return r.rows[0]?.data || { key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', categoryBudgets:{} };
+    }
   },
-  async setSettings(patch){
+  async setSettings(userId, patch){
     const p = await getPool();
-    const cur = await this.getSettings();
+    const cur = await this.getSettings(userId);
     const next = { ...cur, ...patch, key:'app' };
-    await p.query('insert into settings(key,data) values($1,$2) on conflict (key) do update set data=excluded.data', ['app', next]);
+    if(userId){
+      await p.query('insert into user_settings(user_id,data) values($1,$2) on conflict (user_id) do update set data=excluded.data', [userId, next]);
+    }else{
+      await p.query('insert into settings(key,data) values($1,$2) on conflict (key) do update set data=excluded.data', ['app', next]);
+    }
     return next;
   },
-  async getTransactions(){
+  async getTransactions(userId){
     const p = await getPool();
-    const r = await p.query('select * from transactions order by date desc, id desc');
+    const r = await p.query('select * from transactions where user_id=$1 order by date desc, id desc', [userId||null]);
     return r.rows.map(row=>({
       id: row.id,
       date: row.date,
@@ -119,31 +145,31 @@ export const db = {
       note: row.note||''
     }));
   },
-  async addTransaction(payload){
+  async addTransaction(userId, payload){
     const p = await getPool();
     const id = (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
     await p.query(`insert into transactions(
-      id, date, type, category_id, currency, rate, amount, claim_amount, claimed, emotion, motivation, note
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [
-      id, payload.date, payload.type, payload.categoryId, payload.currency||'TWD', Number(payload.rate)||1,
+      id, user_id, date, type, category_id, currency, rate, amount, claim_amount, claimed, emotion, motivation, note
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [
+      id, userId||null, payload.date, payload.type, payload.categoryId, payload.currency||'TWD', Number(payload.rate)||1,
       Number(payload.amount)||0, Number(payload.claimAmount)||0, payload.claimed===true, payload.emotion||'', payload.motivation||'', payload.note||''
     ]);
     return { id, ...payload };
   },
-  async updateTransaction(id, patch){
+  async updateTransaction(userId, id, patch){
     const p = await getPool();
     // fetch current
-    const cur = await this.getTransactionById(id);
+    const cur = await this.getTransactionById(userId, id);
     if(!cur) return null;
     const next = { ...cur, ...patch };
-    await p.query(`update transactions set date=$2,type=$3,category_id=$4,currency=$5,rate=$6,amount=$7,claim_amount=$8,claimed=$9,emotion=$10,motivation=$11,note=$12 where id=$1`, [
-      id, next.date, next.type, next.categoryId, next.currency||'TWD', Number(next.rate)||1, Number(next.amount)||0, Number(next.claimAmount)||0, next.claimed===true, next.emotion||'', next.motivation||'', next.note||''
+    await p.query(`update transactions set date=$3,type=$4,category_id=$5,currency=$6,rate=$7,amount=$8,claim_amount=$9,claimed=$10,emotion=$11,motivation=$12,note=$13 where id=$1 and user_id=$2`, [
+      id, userId||null, next.date, next.type, next.categoryId, next.currency||'TWD', Number(next.rate)||1, Number(next.amount)||0, Number(next.claimAmount)||0, next.claimed===true, next.emotion||'', next.motivation||'', next.note||''
     ]);
     return next;
   },
-  async getTransactionById(id){
+  async getTransactionById(userId, id){
     const p = await getPool();
-    const r = await p.query('select * from transactions where id=$1', [id]);
+    const r = await p.query('select * from transactions where id=$1 and user_id=$2', [id, userId||null]);
     const row = r.rows[0];
     if(!row) return null;
     return {
@@ -161,42 +187,40 @@ export const db = {
       note: row.note||''
     };
   },
-  async deleteTransaction(id){
+  async deleteTransaction(userId, id){
     const p = await getPool();
-    await p.query('delete from transactions where id=$1', [id]);
+    await p.query('delete from transactions where id=$1 and user_id=$2', [id, userId||null]);
     return true;
   },
-  async exportAll(){
+  async exportAll(userId){
     const [categories, transactions, settings, model] = await Promise.all([
-      this.getCategories(), this.getTransactions(), this.getSettings(), this._getAllModel()
+      this.getCategories(), this.getTransactions(userId), this.getSettings(userId), this._getAllModel(userId)
     ]);
     return { categories, transactions, settings, model };
   },
-  async importAll(data){
+  async importAll(userId, data){
     if(!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) return false;
     const p = await getPool();
     const client = await p.connect();
     try{
       await client.query('begin');
-      await client.query('delete from categories');
-      await client.query('delete from transactions');
-      await client.query('delete from model_words');
-      await client.query('delete from settings where key=$1', ['app']);
-      for(const c of data.categories){
-        await client.query('insert into categories(id,name) values($1,$2) on conflict do nothing',[c.id,c.name]);
-      }
+      -- categories remain global (no delete)
+      await client.query('delete from transactions where user_id=$1', [userId||null]);
+      await client.query('delete from user_model_words where user_id=$1', [userId||null]);
+      await client.query('delete from user_settings where user_id=$1', [userId||null]);
+      for(const c of data.categories){ await client.query('insert into categories(id,name) values($1,$2) on conflict do nothing',[c.id,c.name]); }
       for(const t of data.transactions){
-        await client.query(`insert into transactions(id,date,type,category_id,currency,rate,amount,claim_amount,claimed,emotion,motivation,note)
-          values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) on conflict do nothing`,[
-          t.id, t.date, t.type, t.categoryId, t.currency||'TWD', Number(t.rate)||1, Number(t.amount)||0, Number(t.claimAmount)||0, t.claimed===true, t.emotion||'', t.motivation||'', t.note||''
+        await client.query(`insert into transactions(id,user_id,date,type,category_id,currency,rate,amount,claim_amount,claimed,emotion,motivation,note)
+          values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) on conflict do nothing`,[
+          t.id, userId||null, t.date, t.type, t.categoryId, t.currency||'TWD', Number(t.rate)||1, Number(t.amount)||0, Number(t.claimAmount)||0, t.claimed===true, t.emotion||'', t.motivation||'', t.note||''
         ]);
       }
       if(data.settings){
-        await client.query('insert into settings(key,data) values($1,$2) on conflict (key) do update set data=excluded.data',[ 'app', { key:'app', ...data.settings } ]);
+        await client.query('insert into user_settings(user_id,data) values($1,$2) on conflict (user_id) do update set data=excluded.data',[ userId||null, { key:'app', ...data.settings } ]);
       }
       if(Array.isArray(data.model)){
         for(const rec of data.model){
-          if(rec && rec.word){ await client.query('insert into model_words(word,counts) values($1,$2) on conflict (word) do update set counts=excluded.counts',[ rec.word, rec.counts||{} ]); }
+          if(rec && rec.word){ await client.query('insert into user_model_words(user_id,word,counts) values($1,$2,$3) on conflict (user_id,word) do update set counts=excluded.counts',[ userId||null, rec.word, rec.counts||{} ]); }
         }
       }
       await client.query('commit');
@@ -208,25 +232,25 @@ export const db = {
       client.release();
     }
   },
-  async updateCategoryModelFromNote(note, categoryId){
+  async updateCategoryModelFromNote(userId, note, categoryId){
     if(!note || !categoryId) return false;
     const p = await getPool();
     const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
     for(const w of words){
-      const r = await p.query('select counts from model_words where word=$1', [w]);
+      const r = await p.query('select counts from user_model_words where user_id=$1 and word=$2', [userId||null, w]);
       const rec = r.rows[0] || { counts:{} };
       rec.counts[categoryId] = (Number(rec.counts[categoryId])||0) + 1;
-      await p.query('insert into model_words(word,counts) values($1,$2) on conflict (word) do update set counts=excluded.counts', [w, rec.counts]);
+      await p.query('insert into user_model_words(user_id,word,counts) values($1,$2,$3) on conflict (user_id,word) do update set counts=excluded.counts', [userId||null, w, rec.counts]);
     }
     return true;
   },
-  async suggestCategoryFromNote(note){
+  async suggestCategoryFromNote(userId, note){
     if(!note) return null;
     const p = await getPool();
     const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
     const scores = {};
     for(const w of words){
-      const r = await p.query('select counts from model_words where word=$1', [w]);
+      const r = await p.query('select counts from user_model_words where user_id=$1 and word=$2', [userId||null, w]);
       const rec = r.rows[0];
       if(rec && rec.counts){
         for(const [k,v] of Object.entries(rec.counts)){
@@ -237,9 +261,9 @@ export const db = {
     let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){ bestScore=v; best=k; } }
     return best;
   },
-  async _getAllModel(){
+  async _getAllModel(userId){
     const p = await getPool();
-    const r = await p.query('select word, counts from model_words');
+    const r = await p.query('select word, counts from user_model_words where user_id=$1', [userId||null]);
     return r.rows.map(x=> ({ word:x.word, counts:x.counts||{} }));
   }
 };

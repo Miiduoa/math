@@ -927,6 +927,14 @@
   }
 
   async function main(){
+    // Require login if backend is configured to enforce auth
+    try{
+      const me = await fetch('/api/me').then(r=> r.ok ? r.json() : Promise.reject(r));
+      if(!(me && me.ok)) throw new Error('not login');
+    }catch(_){
+      // redirect to LINE login start (best-effort)
+      try{ location.href = '/auth/line/start'; return; }catch(_){ }
+    }
     $('#txDate').value = today();
     await DB.init();
     bindEvents();
