@@ -927,13 +927,35 @@
   }
 
   async function main(){
-    // Require login if backend is configured to enforce auth
-    try{
-      const me = await fetch('/api/me').then(r=> r.ok ? r.json() : Promise.reject(r));
-      if(!(me && me.ok)) throw new Error('not login');
-    }catch(_){
-      // redirect to LINE login start (best-effort)
-      try{ location.href = '/auth/line/start'; return; }catch(_){ }
+    // Require login if backend enforces auth. Show login/logout UI.
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const userName = document.getElementById('userName');
+    async function refreshAuth(){
+      try{
+        const me = await fetch('/api/me').then(r=> r.ok ? r.json() : Promise.reject(r));
+        if(me && me.ok){
+          if(userName) userName.textContent = me.user?.name ? `您好，${me.user.name}` : '';
+          if(loginBtn) loginBtn.style.display = 'none';
+          if(logoutBtn) logoutBtn.style.display = '';
+          return true;
+        }
+      }catch(_){ /* not logged in */ }
+      if(userName) userName.textContent = '';
+      if(loginBtn) loginBtn.style.display = '';
+      if(logoutBtn) logoutBtn.style.display = 'none';
+      return false;
+    }
+    loginBtn?.addEventListener('click', ()=>{ location.href = '/auth/line/start'; });
+    logoutBtn?.addEventListener('click', async ()=>{
+      try{ await fetch('/auth/logout', { method:'POST' }); }catch(_){ }
+      await refreshAuth();
+      // after logout, keep page but data操作會被擋。也可選擇導向登入。
+    });
+    const authed = await refreshAuth();
+    if(!authed){
+      // 未登入時，停留在頁面，僅顯示登入按鈕，不初始化資料層
+      return;
     }
     $('#txDate').value = today();
     await DB.init();
