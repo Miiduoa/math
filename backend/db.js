@@ -68,6 +68,17 @@ async function initSchema(pool){
     counts jsonb not null default '{}'::jsonb,
     primary key(user_id, word)
   );
+  -- link tables for LINE bot <-> web session
+  create table if not exists user_links (
+    line_user_id text primary key,
+    web_user_id text not null,
+    created_at timestamptz not null default now()
+  );
+  create table if not exists link_codes (
+    code text primary key,
+    line_user_id text not null,
+    expires_at timestamptz not null
+  );
   `);
   // seed settings and default categories
   const res = await pool.query('select count(*)::int as c from categories');
@@ -85,6 +96,28 @@ async function initSchema(pool){
 }
 
 export const db = {
+  async upsertLink(lineUserId, webUserId){
+    const p = await getPool();
+    await p.query('insert into user_links(line_user_id, web_user_id) values($1,$2) on conflict (line_user_id) do update set web_user_id=excluded.web_user_id', [lineUserId, webUserId]);
+    return true;
+  },
+  async getLinkedWebUser(lineUserId){
+    const p = await getPool();
+    const r = await p.query('select web_user_id from user_links where line_user_id=$1', [lineUserId]);
+    return r.rows[0]?.web_user_id || null;
+  },
+  async createLinkCode(lineUserId, ttlSeconds=300){
+    const p = await getPool();
+    const code = (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8)).slice(0,10);
+    const expires = new Date(Date.now()+ttlSeconds*1000).toISOString();
+    await p.query('insert into link_codes(code,line_user_id,expires_at) values($1,$2,$3) on conflict do nothing', [code, lineUserId, expires]);
+    return code;
+  },
+  async consumeLinkCode(code){
+    const p = await getPool();
+    const r = await p.query('delete from link_codes where code=$1 and expires_at>now() returning line_user_id', [code]);
+    return r.rows[0]?.line_user_id || null;
+  },
   async getCategories(){
     const p = await getPool();
     const r = await p.query('select id, name from categories order by name');

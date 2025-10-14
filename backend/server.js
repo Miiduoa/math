@@ -113,6 +113,15 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Line-Signature');
 }
 
+function getBaseUrl(req){
+  try{
+    const proto = (req.headers['x-forwarded-proto']||'https').toString();
+    const host = (req.headers['x-forwarded-host']||req.headers.host||'').toString();
+    if(host){ return `${proto}://${host}`; }
+  }catch(_){ }
+  return '';
+}
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -264,7 +273,9 @@ const server = http.createServer(async (req, res) => {
       }
       const nonce = crypto.randomBytes(12).toString('hex');
       const random = crypto.randomBytes(12).toString('hex');
-      const signedState = createSigned(`${random}|${nonce}|${Date.now()}`);
+      const linkCode = url.searchParams.get('link')||'';
+      const statePayload = linkCode ? `${random}|${nonce}|${Date.now()}|link=${linkCode}` : `${random}|${nonce}|${Date.now()}`;
+      const signedState = createSigned(statePayload);
       const authz = new URL('https://access.line.me/oauth2/v2.1/authorize');
       authz.searchParams.set('response_type','code');
       authz.searchParams.set('client_id', LINE_LOGIN_CHANNEL_ID);
@@ -313,7 +324,16 @@ const server = http.createServer(async (req, res) => {
       const sid = crypto.randomBytes(16).toString('hex');
       sessions.set(sid, { user, createdAt: Date.now() });
       setCookie(res, 'session', createSigned(sid), { maxAge: 60*60*24*7 });
-      clearCookie(res, 'linestate');
+      // Consume link code (if present in state) to bind LINE bot user to this web account
+      try{
+        const parts = parsed.split('|');
+        const pair = parts.find(p=> p && p.startsWith('link='));
+        if(pair && isDbEnabled()){
+          const codeStr = pair.slice('link='.length);
+          const lineUid = await pgdb.consumeLinkCode(codeStr);
+          if(lineUid){ await pgdb.upsertLink(lineUid, user.id); }
+        }
+      }catch(_){ }
       res.writeHead(302, { Location: '/' });
       return res.end();
     }
@@ -680,11 +700,53 @@ const server = http.createServer(async (req, res) => {
       // Handle message events
       for(const ev of events){
         try{
+          // Follow event: send binding Flex message
+          if(ev.type==='follow'){
+            const lineUidRaw = ev.source?.userId || '';
+            if(isDbEnabled() && lineUidRaw){
+              const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
+              const base = getBaseUrl(req) || '';
+              const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
+              const flex = {
+                type:'flex', altText:'綁定帳號', contents:{
+                  type:'bubble',
+                  hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
+                  body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
+                    { type:'text', text:'綁定帳號', weight:'bold', size:'xl', color:'#0f172a' },
+                    { type:'text', text:'點擊下方按鈕開啟網站並登入，即可完成綁定。完成後可直接用 LINE 記帳與查詢統計。', wrap:true, size:'sm', color:'#64748b' }
+                  ]},
+                  footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
+                    { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往綁定', uri: linkUrl } },
+                    { type:'separator' },
+                    { type:'button', style:'link', action:{ type:'uri', label:'瞭解更多', uri: `${getBaseUrl(req)}` } }
+                  ], flex:0 }
+                }
+              };
+              await lineReply(ev.replyToken, [flex]);
+            }
+            continue;
+          }
           if(ev.type==='message' && ev.message?.type==='text'){
             const replyToken = ev.replyToken;
             const lineUidRaw = ev.source?.userId || '';
-            const userId = lineUidRaw ? `line:${lineUidRaw}` : null;
+            let userId = lineUidRaw ? `line:${lineUidRaw}` : null;
+            // if link table exists and has mapping, use mapped web user id
+            try{
+              if(isDbEnabled() && lineUidRaw){
+                const mapped = await pgdb.getLinkedWebUser(`line:${lineUidRaw}`);
+                if(mapped) userId = mapped;
+              }
+            }catch(_){ }
             const text = String(ev.message.text||'').trim();
+            if(/^綁定$/.test(text)){
+              if(isDbEnabled() && lineUidRaw){
+                const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
+                const base = getBaseUrl(req) || '';
+                const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
+                await lineReply(replyToken, [{ type:'text', text:`請點擊連結綁定：${linkUrl}` }]);
+                continue;
+              }
+            }
             // Quick intent: stats
             const stats = await handleStatsQuery(userId, text);
             if(stats){ await lineReply(replyToken, [{ type:'text', text: stats }]); continue; }
@@ -722,12 +784,25 @@ const server = http.createServer(async (req, res) => {
               continue;
             }
             // Fallback help
-            await lineReply(replyToken, [{ type:'text', text:'可以直接輸入：「支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款」，或問「這月支出多少？」' }]);
+            await lineReply(replyToken, [{ type:'text', text:'可以直接輸入：「支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款」，或問「這月支出多少？」\n若要把 LINE 與網頁帳號綁定，請輸入：綁定' }]);
           }
         }catch(err){ try{ console.error('line handle error', err); }catch(_){ } }
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true }));
+    }
+
+    // Create a one-time binding code (web side) to link current logged-in web user with a LINE user later
+    if (req.method === 'POST' && reqPath === '/api/link/create'){
+      if(!REQUIRE_AUTH){ res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      const user = getUserFromRequest(req);
+      if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      const raw = await parseBody(req);
+      const { lineUserId='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      if(!isDbEnabled() || !lineUserId){ res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      await pgdb.upsertLink(lineUserId, user.id || user.userId || '');
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true }));
     }
 
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
