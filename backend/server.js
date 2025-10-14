@@ -557,7 +557,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (req.method === 'POST' && reqPath === '/line/webhook') {
+    const isLineWebhookPath = (reqPath === '/line/webhook' || reqPath === '/line/webhook/');
+    if (req.method === 'POST' && isLineWebhookPath) {
       const raw = await parseBody(req);
       const sig = req.headers['x-line-signature'];
       if (!verifyLineSignature(raw, typeof sig === 'string' ? sig : '')) {
