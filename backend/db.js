@@ -1,7 +1,6 @@
-import { Pool } from 'pg';
-
 const connectionString = process.env.DATABASE_URL || '';
 let pool = null;
+let Pool = null; // lazy-loaded from 'pg'
 
 export function isDbEnabled(){
   return Boolean(connectionString);
@@ -10,6 +9,7 @@ export function isDbEnabled(){
 export async function getPool(){
   if(!isDbEnabled()) throw new Error('DATABASE_URL not configured');
   if(!pool){
+    if(!Pool){ const mod = await import('pg'); Pool = mod.Pool; }
     pool = new Pool({ connectionString, ssl: getSslConfig() });
     await initSchema(pool);
   }
@@ -204,7 +204,7 @@ export const db = {
     const client = await p.connect();
     try{
       await client.query('begin');
-      -- categories remain global (no delete)
+      // categories remain global (no delete)
       await client.query('delete from transactions where user_id=$1', [userId||null]);
       await client.query('delete from user_model_words where user_id=$1', [userId||null]);
       await client.query('delete from user_settings where user_id=$1', [userId||null]);
