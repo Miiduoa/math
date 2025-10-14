@@ -164,14 +164,14 @@ const server = http.createServer(async (req, res) => {
           LINE_LOGIN_REDIRECT_URI: !LINE_LOGIN_REDIRECT_URI
         }}));
       }
-      const state = crypto.randomBytes(12).toString('hex');
       const nonce = crypto.randomBytes(12).toString('hex');
-      setCookie(res, 'linestate', createSigned(`${state}|${nonce}|${Date.now()}`), { maxAge: 600 });
+      const random = crypto.randomBytes(12).toString('hex');
+      const signedState = createSigned(`${random}|${nonce}|${Date.now()}`);
       const authz = new URL('https://access.line.me/oauth2/v2.1/authorize');
       authz.searchParams.set('response_type','code');
       authz.searchParams.set('client_id', LINE_LOGIN_CHANNEL_ID);
       authz.searchParams.set('redirect_uri', LINE_LOGIN_REDIRECT_URI);
-      authz.searchParams.set('state', state);
+      authz.searchParams.set('state', signedState);
       authz.searchParams.set('scope','profile openid');
       authz.searchParams.set('nonce', nonce);
       try{ console.log('[line-login] authorize URL', authz.toString()); }catch(_){ }
@@ -182,12 +182,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && reqPath === '/auth/line/callback'){
       const code = url.searchParams.get('code')||'';
       const state = url.searchParams.get('state')||'';
-      const cookies = parseCookies(req);
-      const raw = cookies['linestate']||'';
-      const parsed = verifySigned(raw);
+      const parsed = verifySigned(state);
       if(!parsed){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Invalid state'); }
-      const [savedState] = parsed.split('|');
-      if(!state || state!==savedState){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('State mismatch'); }
       if(!code){ res.writeHead(400, { 'Content-Type':'text/plain; charset=utf-8' }); return res.end('Missing code'); }
       // exchange token
       const tokenEndpoint = 'https://api.line.me/oauth2/v2.1/token';
