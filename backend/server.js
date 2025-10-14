@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDbEnabled, db as pgdb } from './db.js';
 
 // Load local env variables from .env.local (if exists, non-production convenience)
 try{
@@ -165,113 +166,194 @@ const server = http.createServer(async (req, res) => {
 
     // Categories
     if (req.method === 'GET' && reqPath === '/api/categories') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(store.categories));
+      if(isDbEnabled()){
+        const rows = await pgdb.getCategories();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(rows));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(store.categories));
+      }
     }
     if (req.method === 'POST' && reqPath === '/api/categories') {
       const raw = await parseBody(req);
       const { name = '' } = JSON.parse(raw.toString('utf-8') || '{}');
-      const id = String(name).trim().toLowerCase().replace(/\s+/g,'-');
-      if(!id){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'invalid_name' })); }
-      if(store.categories.some(c=>c.id===id)){ res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, category: store.categories.find(c=>c.id===id) })); }
-      const cat = { id, name: String(name).trim() };
-      store.categories.push(cat);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, category: cat }));
+      if(isDbEnabled()){
+        if(!String(name).trim()){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'invalid_name' })); }
+        const cat = await pgdb.addCategory(name);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, category: cat }));
+      } else {
+        const id = String(name).trim().toLowerCase().replace(/\s+/g,'-');
+        if(!id){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'invalid_name' })); }
+        if(store.categories.some(c=>c.id===id)){ res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, category: store.categories.find(c=>c.id===id) })); }
+        const cat = { id, name: String(name).trim() };
+        store.categories.push(cat);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true, category: cat }));
+      }
     }
     if (req.method === 'DELETE' && reqPath.startsWith('/api/categories/')){
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
-      if(store.transactions.some(t=>t.categoryId===id)){
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok:false, error:'in_use' }));
+      if(isDbEnabled()){
+        const ok = await pgdb.deleteCategory(id);
+        if(!ok){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'in_use' })); }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true }));
+      } else {
+        if(store.transactions.some(t=>t.categoryId===id)){
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ ok:false, error:'in_use' }));
+        }
+        const before = store.categories.length;
+        store.categories = store.categories.filter(c=>c.id!==id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: store.categories.length<before }));
       }
-      const before = store.categories.length;
-      store.categories = store.categories.filter(c=>c.id!==id);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: store.categories.length<before }));
     }
 
     // Transactions
     if (req.method === 'GET' && reqPath === '/api/transactions'){
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(store.transactions));
+      if(isDbEnabled()){
+        const rows = await pgdb.getTransactions();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(rows));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(store.transactions));
+      }
     }
     if (req.method === 'POST' && reqPath === '/api/transactions'){
       const raw = await parseBody(req);
       const payload = JSON.parse(raw.toString('utf-8') || '{}');
-      const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
-      const rec = { id, ...payload };
-      store.transactions.unshift(rec);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      if(isDbEnabled()){
+        const rec = await pgdb.addTransaction(payload);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      } else {
+        const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
+        const rec = { id, ...payload };
+        store.transactions.unshift(rec);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      }
     }
     if (req.method === 'GET' && reqPath.startsWith('/api/transactions/')){
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
-      const rec = store.transactions.find(t=>t.id===id) || null;
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      if(isDbEnabled()){
+        const rec = await pgdb.getTransactionById(id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      } else {
+        const rec = store.transactions.find(t=>t.id===id) || null;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      }
     }
     if (req.method === 'PUT' && reqPath.startsWith('/api/transactions/')){
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
-      const idx = store.transactions.findIndex(t=>t.id===id);
-      if(idx<0){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-      store.transactions[idx] = { ...store.transactions[idx], ...patch };
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok:true, transaction: store.transactions[idx] }));
+      if(isDbEnabled()){
+        const rec = await pgdb.updateTransaction(id, patch);
+        if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
+      } else {
+        const idx = store.transactions.findIndex(t=>t.id===id);
+        if(idx<0){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+        store.transactions[idx] = { ...store.transactions[idx], ...patch };
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, transaction: store.transactions[idx] }));
+      }
     }
     if (req.method === 'DELETE' && reqPath.startsWith('/api/transactions/')){
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
-      const before = store.transactions.length;
-      store.transactions = store.transactions.filter(t=>t.id!==id);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: store.transactions.length<before }));
+      if(isDbEnabled()){
+        await pgdb.deleteTransaction(id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true }));
+      } else {
+        const before = store.transactions.length;
+        store.transactions = store.transactions.filter(t=>t.id!==id);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: store.transactions.length<before }));
+      }
     }
 
     // Settings
     if (req.method === 'GET' && reqPath === '/api/settings'){
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(store.settings));
+      if(isDbEnabled()){
+        const s = await pgdb.getSettings();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(s));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(store.settings));
+      }
     }
     if (req.method === 'PUT' && reqPath === '/api/settings'){
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
-      store.settings = { ...store.settings, ...patch };
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(store.settings));
+      if(isDbEnabled()){
+        const next = await pgdb.setSettings(patch);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(next));
+      } else {
+        store.settings = { ...store.settings, ...patch };
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(store.settings));
+      }
     }
 
     // Model
     if (req.method === 'POST' && reqPath === '/api/model/update'){
       const raw = await parseBody(req);
       const { note='', categoryId='' } = JSON.parse(raw.toString('utf-8')||'{}');
-      const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-      for(const w of words){
-        let rec = store.model.find(r=>r.word===w);
-        if(!rec){ rec={ word:w, counts:{} }; store.model.push(rec); }
-        rec.counts[categoryId] = (rec.counts[categoryId]||0) + 1;
+      if(isDbEnabled()){
+        await pgdb.updateCategoryModelFromNote(note, categoryId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true }));
+      } else {
+        const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+        for(const w of words){
+          let rec = store.model.find(r=>r.word===w);
+          if(!rec){ rec={ word:w, counts:{} }; store.model.push(rec); }
+          rec.counts[categoryId] = (rec.counts[categoryId]||0) + 1;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true }));
       }
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok:true }));
     }
     if (req.method === 'POST' && reqPath === '/api/model/suggest'){
       const raw = await parseBody(req);
       const { note='' } = JSON.parse(raw.toString('utf-8')||'{}');
-      const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-      const scores = {};
-      for(const w of words){
-        const rec = store.model.find(r=>r.word===w);
-        if(rec && rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0);} }
+      if(isDbEnabled()){
+        const catId = await pgdb.suggestCategoryFromNote(note);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, categoryId: catId }));
+      } else {
+        const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+        const scores = {};
+        for(const w of words){
+          const rec = store.model.find(r=>r.word===w);
+          if(rec && rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0);} }
+        }
+        let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){ bestScore=v; best=k; } }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, categoryId: best }));
       }
-      let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){ bestScore=v; best=k; } }
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok:true, categoryId: best }));
     }
 
     if (req.method === 'GET' && reqPath === '/api/sync/export') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(store));
+      if(isDbEnabled()){
+        const data = await pgdb.exportAll();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(data));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(store));
+      }
     }
 
     if (req.method === 'POST' && reqPath === '/api/sync/import') {
@@ -281,12 +363,18 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: false, error: 'invalid payload' }));
       }
-      store.categories = data.categories;
-      store.transactions = data.transactions;
-      if (data.settings) store.settings = data.settings;
-      if (Array.isArray(data.model)) store.model = data.model;
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true }));
+      if(isDbEnabled()){
+        await pgdb.importAll(data);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true }));
+      } else {
+        store.categories = data.categories;
+        store.transactions = data.transactions;
+        if (data.settings) store.settings = data.settings;
+        if (Array.isArray(data.model)) store.model = data.model;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: true }));
+      }
     }
 
     if (req.method === 'POST' && reqPath === '/line/webhook') {

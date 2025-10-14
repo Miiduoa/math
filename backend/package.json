@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "pg": "^8.11.0"
+  },
   "scripts": {
     "start": "node server.js"
   }
