@@ -259,6 +259,25 @@ img,video{max-width:100%;height:auto}
   .calendar .cal-cell{min-height:56px}
   dialog.quick-form, .category-form{min-width:0;width:90vw}
 }
+/* iOS-like tighter mobile polish */
+@media (max-width:560px){
+  :root{ --button-height:48px; --button-px:16px; --radius:16px; --radius-lg:20px }
+  .container{ padding:0 10px; gap:12px }
+  .card{ padding:14px }
+  h2{ font-size:17px }
+  label{ font-size:13px }
+  input,select{ padding:12px }
+  /* Hide secondary actions to reduce crowding on small screens */
+  #exportJsonBtn,.import-label,#syncBtn{ display:none }
+  /* Filters stack nicely */
+  .filters{ row-gap:6px }
+  .filters input[type="search"], .filters select{ flex:1 1 100%; min-width:0 }
+  /* List items spacing */
+  .tx-item{ padding:14px; grid-template-columns:1fr auto }
+  .tx-actions button{ min-width:0; padding:0 10px }
+  /* Bottom tabs full width, iOS-like */
+  .tabs.bottom{ left:0; transform:none; width:100%; justify-content:space-between; padding:0 8px }
+}
 @media (max-width:420px){
   .app-header h1{font-size:20px}
   button{height:42px}
