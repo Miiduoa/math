@@ -419,7 +419,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
-    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/index.html' || reqPath === '/styles.css' || reqPath === '/app.js' || reqPath === '/db.js')) {
+    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/index.html' || reqPath === '/styles.css' || reqPath === '/app.js' || reqPath === '/db.js' || reqPath === '/flex-glass.svg')) {
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = path.dirname(__filename);
       const rootDir = path.resolve(__dirname, '..');
@@ -429,6 +429,7 @@ const server = http.createServer(async (req, res) => {
         const mime = ext === '.html' ? 'text/html; charset=utf-8'
           : ext === '.css' ? 'text/css; charset=utf-8'
           : ext === '.js' ? 'application/javascript; charset=utf-8'
+          : ext === '.svg' ? 'image/svg+xml; charset=utf-8'
           : 'text/plain; charset=utf-8';
         const content = fs.readFileSync(filePath);
         res.writeHead(200, { 'Content-Type': mime });
@@ -743,7 +744,22 @@ const server = http.createServer(async (req, res) => {
                 const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
                 const base = getBaseUrl(req) || '';
                 const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
-                await lineReply(replyToken, [{ type:'text', text:`請點擊連結綁定：${linkUrl}` }]);
+                const flex = {
+                  type:'flex', altText:'綁定帳號', contents:{
+                    type:'bubble',
+                    hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
+                    body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
+                      { type:'text', text:'綁定帳號', weight:'bold', size:'xl', color:'#0f172a' },
+                      { type:'text', text:'點擊下方按鈕開啟網站並登入，即可完成綁定。完成後可直接用 LINE 記帳與查詢統計。', wrap:true, size:'sm', color:'#64748b' }
+                    ]},
+                    footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
+                      { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往綁定', uri: linkUrl } },
+                      { type:'separator' },
+                      { type:'button', style:'link', action:{ type:'uri', label:'瞭解更多', uri: `${base}` } }
+                    ], flex:0 }
+                  }
+                };
+                await lineReply(replyToken, [flex]);
                 continue;
               }
             }
