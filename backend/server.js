@@ -28,6 +28,7 @@ try{
 
 const PORT = Number(process.env.PORT || 8787);
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
+const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH||'false').toLowerCase()==='true';
 const LINE_LOGIN_CHANNEL_ID = process.env.LINE_LOGIN_CHANNEL_ID || '';
@@ -136,10 +137,107 @@ function parseBody(req) {
 function verifyLineSignature(rawBody, signature) {
   if (!LINE_CHANNEL_SECRET) return true; // skip if not configured
   if (!signature) return false;
-  const hmac = crypto.createHmac('sha256', LINE_CHANNEL_SECRET);
-  hmac.update(rawBody);
-  const digest = hmac.digest('base64');
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  try{
+    const hmac = crypto.createHmac('sha256', LINE_CHANNEL_SECRET);
+    hmac.update(rawBody);
+    const digest = hmac.digest('base64');
+    const a = Buffer.from(signature, 'base64');
+    const b = Buffer.from(digest, 'base64');
+    if(a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  }catch(_){
+    return false;
+  }
+}
+
+async function lineReply(replyToken, messages){
+  if(!LINE_CHANNEL_ACCESS_TOKEN){ return false; }
+  const payload = { replyToken, messages };
+  try{
+    await fetchJson('https://api.line.me/v2/bot/message/reply', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}` },
+      body: JSON.stringify(payload)
+    }, 10000);
+    return true;
+  }catch(_){ return false; }
+}
+
+function parseNlpQuick(text){
+  const t = String(text||'').trim();
+  const result = { };
+  if(/(^|\s)(支出|花費|付|花|扣)($|\s)/.test(t)) result.type='expense';
+  if(/(^|\s)(收入|入帳|收)($|\s)/.test(t)) result.type='income';
+  const amt = t.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if(amt) result.amount = Number(amt[1]);
+  const cur = t.match(/\b(TWD|USD|JPY|EUR|CNY|HKD)\b/i);
+  if(cur) result.currency = cur[1].toUpperCase();
+  const rate = t.match(/匯率\s*([0-9]+(?:\.[0-9]+)?)/);
+  if(rate) result.rate = Number(rate[1]);
+  const date = t.match(/(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if(date){ const y=Number(date[1]); const m=String(Number(date[2])).padStart(2,'0'); const d=String(Number(date[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
+  const camt = t.match(/請款\s*([0-9]+(?:\.[0-9]+)?)/);
+  if(camt) result.claimAmount = Number(camt[1]);
+  if(/已請款|完成請款|報帳完成/.test(t)) result.claimed = true;
+  if(/未請款|還沒請款/.test(t)) result.claimed = false;
+  result.note = t;
+  return result;
+}
+
+async function aiStructParse(text, context){
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  if(!OPENAI_API_KEY){ return null; }
+  const payload = {
+    model: OPENAI_MODEL,
+    messages: [
+      { role:'system', content:'你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD), categoryName(string), rate(number,可省略), claimAmount(number,可省略), claimed(boolean,可省略), note(string)。只輸出 JSON，不要其他文字。'},
+      { role:'user', content: text }
+    ],
+    temperature: 0.2
+  };
+  const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
+  const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+  const endpoint = `${apiBase}/chat/completions`;
+  try{
+    const data = await fetchJson(endpoint, {
+      method:'POST',
+      headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' },
+      body: JSON.stringify(payload)
+    }, 20000);
+    const reply = data?.choices?.[0]?.message?.content || '';
+    try{ return JSON.parse(reply); }catch(_){ return null; }
+  }catch(_){ return null; }
+}
+
+function todayYmd(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+
+async function handleStatsQuery(userId, text){
+  const lower = String(text||'').toLowerCase();
+  const txs = await (isDbEnabled() ? pgdb.getTransactions(userId) : []);
+  const ym = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+  const monthTx = txs.filter(t=> (t.date||'').startsWith(ym));
+  const sum = (arr)=> arr.reduce((s,t)=> s + ((Number(t.amount)||0) * (t.type==='income'?1:-1)), 0);
+  if(/(本月|這月).*(總)?支出/.test(text)){
+    const expense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    return `本月支出共 $${expense.toFixed(2)}`;
+  }
+  const catM = text.match(/(本月|這月).*?(餐飲|交通|購物|薪資)/);
+  if(catM){
+    const name = catM[2];
+    const cats = await (isDbEnabled()? pgdb.getCategories() : []);
+    const hit = cats.find(c=> c.name===name);
+    const used = monthTx.filter(t=> t.type==='expense' && (t.categoryId===hit?.id || t.categoryName===name));
+    const val = used.reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    return `本月「${name}」支出 $${val.toFixed(2)}`;
+  }
+  if(/(查帳|統計|餘額)/.test(text)){
+    const income = monthTx.filter(t=>t.type==='income').reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    const expense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    return `本月收入 $${income.toFixed(2)}、支出 $${expense.toFixed(2)}、結餘 $${(income-expense).toFixed(2)}`;
+  }
+  return '';
 }
 
 const server = http.createServer(async (req, res) => {
@@ -578,9 +676,56 @@ const server = http.createServer(async (req, res) => {
       }
       let body = {};
       try { body = JSON.parse(raw.toString('utf-8') || '{}'); } catch {}
-      // Minimal echo-like handling (no reply token usage here; just acknowledge)
       const events = Array.isArray(body.events) ? body.events : [];
-      console.log('LINE events:', events.map(e => ({ type: e.type, text: e.message?.text })).slice(0, 3));
+      // Handle message events
+      for(const ev of events){
+        try{
+          if(ev.type==='message' && ev.message?.type==='text'){
+            const replyToken = ev.replyToken;
+            const lineUidRaw = ev.source?.userId || '';
+            const userId = lineUidRaw ? `line:${lineUidRaw}` : null;
+            const text = String(ev.message.text||'').trim();
+            // Quick intent: stats
+            const stats = await handleStatsQuery(userId, text);
+            if(stats){ await lineReply(replyToken, [{ type:'text', text: stats }]); continue; }
+            // Try AI struct parse first
+            let parsed = await aiStructParse(text, {});
+            if(!parsed){ parsed = parseNlpQuick(text); }
+            if(parsed && Number.isFinite(Number(parsed.amount))){
+              const payload = {
+                date: parsed.date || todayYmd(),
+                type: parsed.type || 'expense',
+                categoryId: '',
+                currency: (parsed.currency||'TWD'),
+                rate: Number(parsed.rate)||1,
+                amount: Number(parsed.amount)||0,
+                claimAmount: Number(parsed.claimAmount)||0,
+                claimed: parsed.claimed===true,
+                note: String(parsed.note||'')
+              };
+              // try category inference by name
+              if(parsed.categoryName){
+                try{
+                  const cats = await (isDbEnabled()? pgdb.getCategories() : []);
+                  const hit = cats.find(c=> String(c.name).toLowerCase()===String(parsed.categoryName).toLowerCase());
+                  if(hit) payload.categoryId = hit.id;
+                }catch(_){ }
+              }
+              // fallback to first category if empty
+              if(!payload.categoryId){
+                try{ const cats = await (isDbEnabled()? pgdb.getCategories() : []); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
+              }
+              if(isDbEnabled()){
+                await pgdb.addTransaction(userId, payload);
+              }
+              await lineReply(replyToken, [{ type:'text', text: `已記${payload.type==='income'?'收入':'支出'} $${payload.amount}（${payload.currency}）` }]);
+              continue;
+            }
+            // Fallback help
+            await lineReply(replyToken, [{ type:'text', text:'可以直接輸入：「支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款」，或問「這月支出多少？」' }]);
+          }
+        }catch(err){ try{ console.error('line handle error', err); }catch(_){ } }
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true }));
     }
