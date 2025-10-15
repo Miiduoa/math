@@ -43,6 +43,60 @@ const store = {
   model: [] // [{ word, counts: { catId: number } }]
 };
 
+// File-based per-user store (when DATABASE_URL is not set)
+function ensureDir(p){ try{ fs.mkdirSync(p, { recursive:true }); }catch(_){ } }
+function readJson(pathname, fallback){ try{ return JSON.parse(fs.readFileSync(pathname,'utf-8')); }catch(_){ return fallback; } }
+function writeJson(pathname, data){ try{ fs.writeFileSync(pathname, JSON.stringify(data,null,2)); return true; }catch(_){ return false; } }
+function userDirFor(userId){
+  const base = '/data/users';
+  const safe = String(userId||'anonymous').replace(/[^a-zA-Z0-9:_.-]/g,'_');
+  const dir = path.join(base, safe);
+  ensureDir(dir);
+  return dir;
+}
+const fileStore = {
+  seedIfNeeded(userId){
+    const dir = userDirFor(userId);
+    const catsPath = path.join(dir, 'categories.json');
+    if(!fs.existsSync(catsPath)){
+      writeJson(catsPath, [ { id:'food', name:'餐飲' }, { id:'transport', name:'交通' }, { id:'shopping', name:'購物' }, { id:'salary', name:'薪資' } ]);
+    }
+    const setPath = path.join(dir, 'settings.json');
+    if(!fs.existsSync(setPath)){
+      writeJson(setPath, { key:'app', baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', categoryBudgets:{} });
+    }
+    const txPath = path.join(dir, 'transactions.json'); if(!fs.existsSync(txPath)) writeJson(txPath, []);
+    const modelPath = path.join(dir, 'model.json'); if(!fs.existsSync(modelPath)) writeJson(modelPath, []);
+  },
+  getCategories(userId){ this.seedIfNeeded(userId); return readJson(path.join(userDirFor(userId),'categories.json'), []); },
+  addCategory(userId, name){
+    const arr = this.getCategories(userId);
+    const id = String(name).trim().toLowerCase().replace(/\s+/g,'-'); if(!id) return null;
+    if(arr.some(c=>c.id===id)) return arr.find(c=>c.id===id);
+    const rec = { id, name:String(name).trim() }; arr.push(rec);
+    writeJson(path.join(userDirFor(userId),'categories.json'), arr);
+    return rec;
+  },
+  deleteCategory(userId, id){
+    const txs = this.getTransactions(userId);
+    if(txs.some(t=>t.categoryId===id)) return false;
+    const arr = this.getCategories(userId).filter(c=>c.id!==id);
+    writeJson(path.join(userDirFor(userId),'categories.json'), arr);
+    return true;
+  },
+  getSettings(userId){ this.seedIfNeeded(userId); return readJson(path.join(userDirFor(userId),'settings.json'), { key:'app' }); },
+  setSettings(userId, patch){ const cur=this.getSettings(userId); const next={ ...cur, ...patch, key:'app' }; writeJson(path.join(userDirFor(userId),'settings.json'), next); return next; },
+  getTransactions(userId){ this.seedIfNeeded(userId); const rows=readJson(path.join(userDirFor(userId),'transactions.json'), []); return rows.sort((a,b)=> (b.date||'').localeCompare(a.date||'')); },
+  addTransaction(userId, payload){ const rows=this.getTransactions(userId); const id=(crypto.randomUUID&&crypto.randomUUID())||String(Date.now())+Math.random().toString(16).slice(2); const rec={ id, ...payload }; rows.unshift(rec); writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rec; },
+  getTransactionById(userId, id){ return this.getTransactions(userId).find(t=>t.id===id)||null; },
+  updateTransaction(userId, id, patch){ const rows=this.getTransactions(userId); const idx=rows.findIndex(t=>t.id===id); if(idx<0) return null; rows[idx]={ ...rows[idx], ...patch }; writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rows[idx]; },
+  deleteTransaction(userId, id){ let rows=this.getTransactions(userId); const before=rows.length; rows=rows.filter(t=>t.id!==id); writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rows.length<before; },
+  updateCategoryModelFromNote(userId, note, categoryId){ if(!note||!categoryId) return false; const model=readJson(path.join(userDirFor(userId),'model.json'), []); const words=String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); for(const w of words){ let rec=model.find(r=>r.word===w); if(!rec){ rec={ word:w, counts:{} }; model.push(rec); } rec.counts[categoryId]=(rec.counts[categoryId]||0)+1; } writeJson(path.join(userDirFor(userId),'model.json'), model); return true; },
+  suggestCategoryFromNote(userId, note){ if(!note) return null; const model=readJson(path.join(userDirFor(userId),'model.json'), []); const words=String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); const scores={}; for(const w of words){ const rec=model.find(r=>r.word===w); if(rec&&rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0); } } } let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){best=v;bestScore=v;} } return best; },
+  exportAll(userId){ return { categories:this.getCategories(userId), transactions:this.getTransactions(userId), settings:this.getSettings(userId), model: readJson(path.join(userDirFor(userId),'model.json'), []) }; },
+  importAll(userId, data){ if(!data||!Array.isArray(data.categories)||!Array.isArray(data.transactions)) return false; const dir=userDirFor(userId); writeJson(path.join(dir,'categories.json'), data.categories); writeJson(path.join(dir,'transactions.json'), data.transactions); if(data.settings){ writeJson(path.join(dir,'settings.json'), { key:'app', ...data.settings }); } if(Array.isArray(data.model)){ writeJson(path.join(dir,'model.json'), data.model); } return true; }
+};
+
 // Simple in-memory session store (for single-instance). For production multi-instance, use shared store.
 const sessions = new Map(); // sessionId -> { user, createdAt }
 
@@ -105,6 +159,11 @@ function getUserFromRequest(req){
     const s = sessions.get(sid);
     return s && s.user ? s.user : null;
   }catch(_){ return null; }
+}
+
+function reqUserId(req){
+  const u = getUserFromRequest(req);
+  return (u && u.id) ? u.id : 'anonymous';
 }
 
 function setCors(res) {
@@ -446,8 +505,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(rows));
       } else {
+        const uid = reqUserId(req);
+        const rows = fileStore.getCategories(uid);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify(store.categories));
+        return res.end(JSON.stringify(rows));
       }
     }
     if (req.method === 'POST' && reqPath === '/api/categories') {
@@ -461,11 +522,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, category: cat }));
       } else {
-        const id = String(name).trim().toLowerCase().replace(/\s+/g,'-');
-        if(!id){ res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'invalid_name' })); }
-        if(store.categories.some(c=>c.id===id)){ res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, category: store.categories.find(c=>c.id===id) })); }
-        const cat = { id, name: String(name).trim() };
-        store.categories.push(cat);
+        const uid = reqUserId(req);
+        const cat = fileStore.addCategory(uid, name);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true, category: cat }));
       }
@@ -480,14 +538,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       } else {
-        if(store.transactions.some(t=>t.categoryId===id)){
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ ok:false, error:'in_use' }));
-        }
-        const before = store.categories.length;
-        store.categories = store.categories.filter(c=>c.id!==id);
+        const uid = reqUserId(req);
+        const ok = fileStore.deleteCategory(uid, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: store.categories.length<before }));
+        return res.end(JSON.stringify({ ok }));
       }
     }
 
@@ -500,8 +554,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(rows));
       } else {
-        const all = store.transactions;
-        const rows = user ? all.filter(t=>t.userId===user.id) : all;
+        const uid = user?.id || reqUserId(req);
+        const rows = fileStore.getTransactions(uid);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(rows));
       }
@@ -516,9 +570,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
-        const rec = { id, userId: user?.id, ...payload };
-        store.transactions.unshift(rec);
+        const uid = user?.id || reqUserId(req);
+        const rec = fileStore.addTransaction(uid, payload);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
@@ -532,7 +585,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const rec = store.transactions.find(t=>t.id===id && (!user || t.userId===user.id)) || null;
+        const uid = user?.id || reqUserId(req);
+        const rec = fileStore.getTransactionById(uid, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
@@ -549,11 +603,11 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const idx = store.transactions.findIndex(t=>t.id===id && (!user || t.userId===user.id));
-        if(idx<0){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-        store.transactions[idx] = { ...store.transactions[idx], ...patch };
+        const uid = user?.id || reqUserId(req);
+        const rec = fileStore.updateTransaction(uid, id, patch);
+        if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok:true, transaction: store.transactions[idx] }));
+        return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
     }
     if (req.method === 'DELETE' && reqPath.startsWith('/api/transactions/')){
@@ -565,10 +619,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       } else {
-        const before = store.transactions.length;
-        store.transactions = store.transactions.filter(t=>!(t.id===id && (!user || t.userId===user.id)));
+        const uid = user?.id || reqUserId(req);
+        const ok = fileStore.deleteTransaction(uid, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: store.transactions.length<before }));
+        return res.end(JSON.stringify({ ok }));
       }
     }
 
@@ -581,8 +635,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(s));
       } else {
+        const uid = user?.id || reqUserId(req);
+        const s = fileStore.getSettings(uid);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify(store.settings));
+        return res.end(JSON.stringify(s));
       }
     }
     if (req.method === 'PUT' && reqPath === '/api/settings'){
@@ -595,9 +651,10 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(next));
       } else {
-        store.settings = { ...store.settings, ...patch };
+        const uid = user?.id || reqUserId(req);
+        const next = fileStore.setSettings(uid, patch);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify(store.settings));
+        return res.end(JSON.stringify(next));
       }
     }
 
@@ -612,12 +669,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       } else {
-        const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-        for(const w of words){
-          let rec = store.model.find(r=>r.userId===(user&&user.id) && r.word===w);
-          if(!rec){ rec={ word:w, counts:{} }; store.model.push(rec); }
-          rec.counts[categoryId] = (rec.counts[categoryId]||0) + 1;
-        }
+        const uid = user?.id || reqUserId(req);
+        await fileStore.updateCategoryModelFromNote(uid, note, categoryId);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       }
@@ -632,13 +685,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, categoryId: catId }));
       } else {
-        const words = String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-        const scores = {};
-        for(const w of words){
-          const rec = store.model.find(r=>r.userId===(user&&user.id) && r.word===w);
-          if(rec && rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0);} }
-        }
-        let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){ bestScore=v; best=k; } }
+        const uid = user?.id || reqUserId(req);
+        const best = fileStore.suggestCategoryFromNote(uid, note);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, categoryId: best }));
       }
@@ -652,12 +700,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(data));
       } else {
-        const filtered = {
-          categories: store.categories,
-          transactions: store.transactions.filter(t=>!user || t.userId===user.id),
-          settings: store.settings,
-          model: store.model.filter(r=>!user || r.userId===user.id)
-        };
+        const uid = user?.id || reqUserId(req);
+        const filtered = fileStore.exportAll(uid);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(filtered));
       }
@@ -677,11 +721,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true }));
       } else {
-        store.categories = data.categories;
-        const uid = user && user.id;
-        store.transactions = data.transactions.map(t=> ({ userId: uid, ...t }));
-        if (data.settings) store.settings = data.settings;
-        if (Array.isArray(data.model)) store.model = data.model.map(m=> ({ userId: uid, ...m }));
+        const uid = user?.id || reqUserId(req);
+        fileStore.importAll(uid, data);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true }));
       }

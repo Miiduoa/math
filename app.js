@@ -298,6 +298,44 @@
       a.remove();
       URL.revokeObjectURL(url);
     });
+    $('#exportHtmlBtn')?.addEventListener('click', async ()=>{
+      const [settings, txs, cats] = await Promise.all([ DB.getSettings?.(), DB.getTransactions(), DB.getCategories() ]);
+      const ym = (()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })();
+      const monthTx = txs.filter(t=> (t.date||'').startsWith(ym));
+      const income = monthTx.filter(t=>t.type==='income').reduce((s,t)=> s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
+      const expense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
+      const byCat = new Map();
+      const catName = (id)=> cats.find(c=>c.id===id)?.name||id;
+      for(const t of monthTx){ if(t.type!=='expense') continue; const v=toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
+      const catRows = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).map(([id,v])=>`<tr><td>${catName(id)}</td><td style="text-align:right">$${formatAmount(v)}</td></tr>`).join('');
+      const recentRows = monthTx.slice(0,30).map(t=>`<tr><td>${t.date}</td><td>${catName(t.categoryId)}</td><td>${t.note||''}</td><td style="text-align:right">${t.type==='income'?'':'-'}$${formatAmount(toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1))}</td></tr>`).join('');
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>記帳報告</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#f8fbff,#eef3f8);color:#0f172a;margin:0;padding:24px}
+          .card{background:rgba(255,255,255,0.7);backdrop-filter:blur(16px) saturate(160%);border:1px solid rgba(2,6,23,0.08);border-radius:16px;box-shadow:0 10px 30px rgba(2,6,23,0.1);padding:16px;margin:12px auto;max-width:880px}
+          h1,h2{margin:0 0 12px}
+          table{width:100%;border-collapse:collapse}
+          th,td{padding:8px;border-bottom:1px solid rgba(2,6,23,0.08)}
+          th{color:#475569;text-align:left;font-weight:600}
+          .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+          .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid rgba(2,6,23,0.08);background:rgba(255,255,255,0.6)}
+        </style></head><body>
+        <div class="card"><h1>記帳月報</h1><div class="pill">${ym}</div></div>
+        <div class="card"><h2>摘要</h2><div class="summary">
+          <div><div class="pill">收入 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(income)}</div></div>
+          <div><div class="pill">支出 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(expense)}</div></div>
+          <div><div class="pill">結餘 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(income-expense)}</div></div>
+        </div></div>
+        <div class="card"><h2>分類支出</h2><table><thead><tr><th>分類</th><th style="text-align:right">金額</th></tr></thead><tbody>${catRows||'<tr><td colspan="2">本月尚無支出</td></tr>'}</tbody></table></div>
+        <div class="card"><h2>最近交易</h2><table><thead><tr><th>日期</th><th>分類</th><th>備註</th><th style="text-align:right">金額 (TWD)</th></tr></thead><tbody>${recentRows||'<tr><td colspan="4">無資料</td></tr>'}</tbody></table></div>
+      </body></html>`;
+      const blob = new Blob([html], { type:'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `ledger-report-${ym}.html`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
     $('#importJsonInput').addEventListener('change', async (e)=>{
       const file = e.target.files?.[0];
       if(!file) return;
@@ -312,6 +350,21 @@
       }
       e.target.value = '';
     });
+
+    // Backup notice
+    const notice = document.getElementById('backupNotice');
+    const dismissBtn = document.getElementById('backupDismissBtn');
+    const exportBtn = document.getElementById('backupExportBtn');
+    function shouldShowNotice(){
+      try{
+        const last = Number(localStorage.getItem('backupNoticeAt')||0);
+        return Date.now() - last > 1000*60*60*24*14; // 14 days
+      }catch(_){ return true; }
+    }
+    function markNoticeSeen(){ try{ localStorage.setItem('backupNoticeAt', String(Date.now())); }catch(_){ } }
+    if(notice && shouldShowNotice()) notice.style.display='flex';
+    dismissBtn?.addEventListener('click', ()=>{ notice.style.display='none'; markNoticeSeen(); });
+    exportBtn?.addEventListener('click', ()=>{ document.getElementById('exportJsonBtn')?.click(); markNoticeSeen(); });
 
     $('#cancelEditBtn').addEventListener('click', ()=>{
       clearEditingState();

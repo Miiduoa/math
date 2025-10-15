@@ -178,6 +178,12 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
 [data-tab]{display:block}
 .hidden{display:none !important}
 
+/* Notices */
+.notice{margin:12px auto;max-width:960px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:14px;border:1px solid var(--glass-border);background:rgba(255,245,235,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:var(--shadow)}
+.notice--warn{border-color:#f59e0b33;background:rgba(245,158,11,0.08)}
+.notice__content{font-size:14px;color:#92400e}
+.notice__actions{display:flex;gap:8px}
+
 /* Bottom Tab Bar (iOS style) */
 .app-footer + .tabs, .tabs.bottom{
   position:fixed;

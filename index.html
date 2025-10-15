@@ -15,6 +15,7 @@
       <button id="syncBtn" class="ghost" title="與伺服器同步">同步</button>
       <button id="settingsBtn" class="ghost" title="設定與目標">設定</button>
       <button id="exportJsonBtn" class="ghost" title="匯出所有資料">匯出</button>
+      <button id="exportHtmlBtn" class="ghost" title="匯出精美報告">匯出報告</button>
       <label class="import-label">
         <input id="importJsonInput" type="file" accept="application/json" hidden>
         <span class="ghost" title="匯入資料">匯入</span>
@@ -24,6 +25,16 @@
       <button id="logoutBtn" class="ghost" style="margin-left:6px; display:none">登出</button>
     </div>
   </header>
+
+  <div id="backupNotice" class="notice notice--warn" style="display:none">
+    <div class="notice__content">
+      <strong>提醒：</strong>資料儲存在本機/伺服器檔案，請<strong>定期匯出備份</strong>（建議每 2 週一次）。
+    </div>
+    <div class="notice__actions">
+      <button id="backupExportBtn" class="secondary">立即匯出</button>
+      <button id="backupDismissBtn" class="ghost">知道了</button>
+    </div>
+  </div>
 
   <main class="container">
     <nav class="tabs bottom">
