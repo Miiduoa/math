@@ -55,6 +55,25 @@ function userDirFor(userId){
   return dir;
 }
 const fileStore = {
+  migrateUserData(oldId, newId){
+    if(!oldId || !newId || oldId===newId) return false;
+    const oldDir = userDirFor(oldId);
+    const newDir = userDirFor(newId);
+    try{
+      // if new has no transactions but old has, copy over
+      const oldTx = readJson(path.join(oldDir,'transactions.json'), []);
+      const newTx = readJson(path.join(newDir,'transactions.json'), []);
+      if(Array.isArray(oldTx) && oldTx.length>0 && Array.isArray(newTx) && newTx.length===0){
+        // copy categories/settings/model if present
+        const cats = readJson(path.join(oldDir,'categories.json'), null); if(cats) writeJson(path.join(newDir,'categories.json'), cats);
+        const set = readJson(path.join(oldDir,'settings.json'), null); if(set) writeJson(path.join(newDir,'settings.json'), set);
+        const model = readJson(path.join(oldDir,'model.json'), null); if(model) writeJson(path.join(newDir,'model.json'), model);
+        writeJson(path.join(newDir,'transactions.json'), oldTx);
+        return true;
+      }
+    }catch(_){ }
+    return false;
+  },
   seedIfNeeded(userId){
     const dir = userDirFor(userId);
     const catsPath = path.join(dir, 'categories.json');
@@ -376,7 +395,7 @@ const server = http.createServer(async (req, res) => {
         profile = await fetchJson('https://api.line.me/v2/profile', { headers:{ 'Authorization': `Bearer ${accessToken}` } }, 15000);
       }catch(err){ try{ console.error('[line-login] profile error', err); }catch(_){ } profile=null; }
       const user = {
-        id: profile?.userId || 'line:'+(tokenData?.id_token||'').slice(0,8),
+        id: profile?.userId ? `line:${profile.userId}` : ('line:'+(tokenData?.id_token||'').slice(0,8)),
         name: profile?.displayName || 'LINE User',
         picture: profile?.pictureUrl || ''
       };
@@ -391,6 +410,15 @@ const server = http.createServer(async (req, res) => {
           const codeStr = pair.slice('link='.length);
           const lineUid = await pgdb.consumeLinkCode(codeStr);
           if(lineUid){ await pgdb.upsertLink(lineUid, user.id); }
+        }
+      }catch(_){ }
+      // File-based migration: move from legacy IDs to new LINE-based ID if present
+      try{
+        if(!isDbEnabled()){
+          // common legacy IDs: raw profile userId (without prefix) and anonymous
+          const legacyRaw = (profile?.userId)||'';
+          if(legacyRaw){ try{ fileStore.migrateUserData(legacyRaw, user.id); }catch(_){ } }
+          try{ fileStore.migrateUserData('anonymous', user.id); }catch(_){ }
         }
       }catch(_){ }
       res.writeHead(302, { Location: '/' });
@@ -782,6 +810,25 @@ const server = http.createServer(async (req, res) => {
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
             if(normalized==='綁定' || normalized==='绑定'){
+              if(!isDbEnabled() && lineUidRaw){
+                const base = getBaseUrl(req) || '';
+                const linkUrl = `${base}/auth/line/start`;
+                const flex = {
+                  type:'flex', altText:'登入即可共用資料', contents:{
+                    type:'bubble',
+                    hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
+                    body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
+                      { type:'text', text:'登入即可共用資料', weight:'bold', size:'xl', color:'#0f172a' },
+                      { type:'text', text:'目前使用檔案持久化，不需綁定。請點擊下方按鈕用 LINE 登入網站，即可與 Bot 共用同一份資料。', wrap:true, size:'sm', color:'#64748b' }
+                    ]},
+                    footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
+                      { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往登入', uri: linkUrl } }
+                    ], flex:0 }
+                  }
+                };
+                await lineReply(replyToken, [flex]);
+                continue;
+              }
               if(isDbEnabled() && lineUidRaw){
                 const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
                 const base = getBaseUrl(req) || '';
