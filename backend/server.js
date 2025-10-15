@@ -47,8 +47,9 @@ const store = {
 function ensureDir(p){ try{ fs.mkdirSync(p, { recursive:true }); }catch(_){ } }
 function readJson(pathname, fallback){ try{ return JSON.parse(fs.readFileSync(pathname,'utf-8')); }catch(_){ return fallback; } }
 function writeJson(pathname, data){ try{ fs.writeFileSync(pathname, JSON.stringify(data,null,2)); return true; }catch(_){ return false; } }
+const DATA_BASE = process.env.DATA_DIR || path.resolve('.', 'data', 'users');
 function userDirFor(userId){
-  const base = '/data/users';
+  const base = DATA_BASE;
   const safe = String(userId||'anonymous').replace(/[^a-zA-Z0-9:_.-]/g,'_');
   const dir = path.join(base, safe);
   ensureDir(dir);

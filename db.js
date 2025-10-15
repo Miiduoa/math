@@ -415,6 +415,12 @@
     }catch(_){ }
     return supportsIndexedDB ? idb : memory;
   }
+  // 暴露 providers 以便登入後在執行期切換
+  try{
+    window.DB_remote = remote;
+    window.DB_idb = idb;
+    window.DB_memory = memory;
+  }catch(_){ }
   window.DB = choose();
 })();
 

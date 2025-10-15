@@ -168,6 +168,28 @@
   }
 
   function bindEvents(){
+    // 手動同步：將本機 IndexedDB 資料上傳到伺服器
+    document.getElementById('syncBtn')?.addEventListener('click', async ()=>{
+      try{
+        const hasIdb = typeof window!=='undefined' && window.DB_idb;
+        const hasRemote = typeof window!=='undefined' && window.DB_remote;
+        if(!hasIdb || !hasRemote){ alert('無本機或伺服器資料來源可同步'); return; }
+        // 匯出本機資料
+        await window.DB_idb.init?.();
+        const localDump = await window.DB_idb.exportAll();
+        // 切換到伺服器後匯入
+        const prev = window.DB;
+        window.DB = window.DB_remote;
+        await DB.init?.();
+        await DB.importAll(localDump);
+        await refresh();
+        // 切回原本 provider（僅在使用者尚未登入前想維持本機使用體驗）
+        window.DB = prev;
+        alert('同步完成');
+      }catch(err){
+        alert('同步失敗，請稍後再試');
+      }
+    });
     $('#txForm').addEventListener('submit', async (e)=>{
       e.preventDefault();
       const form = e.currentTarget;
@@ -1011,6 +1033,33 @@
       return;
     }
     $('#txDate').value = today();
+
+    // 登入後：若之前使用本機 IndexedDB，嘗試把本機資料匯出並上傳至伺服器，之後切換成伺服器端資料源
+    try{
+      const hasServer = (typeof window!=='undefined') && window.DB_remote;
+      const serverBase = (localStorage.getItem('serverUrl')||'').trim() || (location && location.origin) || '';
+      if(hasServer && /^https?:\/\//.test(String(serverBase))){
+        // 1) 先初始化本機 DB 以取得現有資料
+        if(window.DB_idb){ try{ await window.DB_idb.init(); }catch(_){ /* ignore */ } }
+        // 2) 匯出本機資料
+        let localExport = null;
+        try{ localExport = await (window.DB_idb ? window.DB_idb.exportAll() : (DB.exportAll?.()||null)); }catch(_){ }
+        // 3) 切換到伺服器 provider
+        if(window.DB_remote){ window.DB = window.DB_remote; }
+        await DB.init?.();
+        // 4) 若伺服器目前沒有資料而本機有，則上傳匯入一次
+        try{
+          const [serverCats, serverTxs] = await Promise.all([ DB.getCategories(), DB.getTransactions() ]);
+          const serverEmpty = (Array.isArray(serverCats)&&serverCats.length<=1) && (Array.isArray(serverTxs)&&serverTxs.length===0);
+          if(localExport && Array.isArray(localExport.transactions) && localExport.transactions.length>0 && serverEmpty){
+            await DB.importAll(localExport);
+          }
+        }catch(_){ /* ignore sync errors */ }
+      } else {
+        // 無伺服器可用時，保持本機 DB
+      }
+    }catch(_){ /* ignore */ }
+
     await DB.init();
     bindEvents();
     bindCalendarEvents();
