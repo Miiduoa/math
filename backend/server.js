@@ -110,7 +110,16 @@ const fileStore = {
   addTransaction(userId, payload){ const rows=this.getTransactions(userId); const id=(crypto.randomUUID&&crypto.randomUUID())||String(Date.now())+Math.random().toString(16).slice(2); const rec={ id, ...payload }; rows.unshift(rec); writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rec; },
   getTransactionById(userId, id){ return this.getTransactions(userId).find(t=>t.id===id)||null; },
   updateTransaction(userId, id, patch){ const rows=this.getTransactions(userId); const idx=rows.findIndex(t=>t.id===id); if(idx<0) return null; rows[idx]={ ...rows[idx], ...patch }; writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rows[idx]; },
-  deleteTransaction(userId, id){ let rows=this.getTransactions(userId); const before=rows.length; rows=rows.filter(t=>t.id!==id); writeJson(path.join(userDirFor(userId),'transactions.json'), rows); return rows.length<before; },
+  deleteTransaction(userId, id){
+    let rows=this.getTransactions(userId);
+    const idx = rows.findIndex(t=> t.id===id);
+    if(idx>=0){
+      rows.splice(idx,1); // remove only the first matched record to avoid deleting duplicates
+      writeJson(path.join(userDirFor(userId),'transactions.json'), rows);
+      return true;
+    }
+    return false;
+  },
   updateCategoryModelFromNote(userId, note, categoryId){ if(!note||!categoryId) return false; const model=readJson(path.join(userDirFor(userId),'model.json'), []); const words=String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); for(const w of words){ let rec=model.find(r=>r.word===w); if(!rec){ rec={ word:w, counts:{} }; model.push(rec); } rec.counts[categoryId]=(rec.counts[categoryId]||0)+1; } writeJson(path.join(userDirFor(userId),'model.json'), model); return true; },
   suggestCategoryFromNote(userId, note){ if(!note) return null; const model=readJson(path.join(userDirFor(userId),'model.json'), []); const words=String(note).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); const scores={}; for(const w of words){ const rec=model.find(r=>r.word===w); if(rec&&rec.counts){ for(const [k,v] of Object.entries(rec.counts)){ scores[k]=(scores[k]||0)+Number(v||0); } } } let best=null,bestScore=0; for(const [k,v] of Object.entries(scores)){ if(v>bestScore){best=v;bestScore=v;} } return best; },
   exportAll(userId){ return { categories:this.getCategories(userId), transactions:this.getTransactions(userId), settings:this.getSettings(userId), model: readJson(path.join(userDirFor(userId),'model.json'), []) }; },
