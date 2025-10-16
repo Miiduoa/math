@@ -36,6 +36,13 @@
     </div>
   </div>
 
+  <div id="broadcastNotice" class="notice notice--warn" style="display:none">
+    <div class="notice__content"></div>
+    <div class="notice__actions">
+      <button class="ghost">關閉</button>
+    </div>
+  </div>
+
   <main class="container">
     <nav class="tabs bottom">
       <button class="tab-btn active" data-tab-target="ledger">記帳</button>
@@ -192,6 +199,23 @@
           <ul id="insightsList" class="insights"></ul>
         </div>
       </div>
+      <hr style="margin:12px 0; opacity:.2">
+      <div id="adminBroadcast" class="assistant" style="display:none">
+        <h3>管理者廣播</h3>
+        <div class="inline">
+          <input id="adminBroadcastInput" type="text" placeholder="公告內容（例如：今晚 23:00 重新部署，請先匯出備份）">
+          <button id="adminBroadcastBtn" class="danger">發送公告</button>
+        </div>
+        <small>僅管理者可見。可設置環境變數 ADMIN_LINE_USER_ID 或使用 X-Admin-Key。</small>
+      </div>
+      <div id="adminModel" class="assistant" style="display:none; margin-top:12px">
+        <h3>模型管理</h3>
+        <div class="inline">
+          <button id="modelBackfillBtn" class="secondary">回填訓練</button>
+          <button id="modelInspectBtn" class="ghost">查看模型摘要</button>
+        </div>
+        <div id="modelInspectView" class="card" style="margin-top:8px; display:none; max-height:280px; overflow:auto"></div>
+      </div>
     </section>
 
     <section class="card" data-tab="calendar">
@@ -249,7 +273,7 @@
         </label>
       </div>
       <menu class="dialog-actions">
-        <button value="cancel" class="ghost">取消</button>
+        <button value="cancel" class="ghost" type="button" formnovalidate>取消</button>
         <button id="quickAddSubmitBtn" value="default" class="primary" type="submit">新增</button>
       </menu>
     </form>
@@ -327,6 +351,18 @@
       <menu class="dialog-actions">
         <button id="saveSettingsBtn" value="default" class="primary" type="button">儲存</button>
         <button value="cancel" class="ghost">關閉</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="importPreviewDialog">
+    <form method="dialog" class="category-form" id="importPreviewForm">
+      <h3>匯入預檢</h3>
+      <div id="importPreviewBody" class="card" style="max-height:300px; overflow:auto"></div>
+      <small>請確認筆數與格式無誤後再進行匯入。此動作會覆蓋現有資料。</small>
+      <menu class="dialog-actions">
+        <button value="cancel" class="ghost">取消</button>
+        <button id="importConfirmBtn" value="default" class="primary" type="submit">確定匯入</button>
       </menu>
     </form>
   </dialog>

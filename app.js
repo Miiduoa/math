@@ -1,6 +1,7 @@
 (function(){
   const $ = (sel, root=document) => root.querySelector(sel);
   const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+  const ADMIN_LINE_USER_ID = 'U5c7738d89a59ff402fd6b56f5472d351';
 
   function showDialogSafe(dialog){
     if(!dialog) return;
@@ -85,14 +86,29 @@
   }
 
   async function refresh(){
-    const [categories, txs] = await Promise.all([
+    const [categories, txs, latestNotice] = await Promise.all([
       DB.getCategories(),
-      DB.getTransactions()
+      DB.getTransactions(),
+      fetch('/api/notice/latest').then(r=> r.ok ? r.json() : { ok:false }).catch(()=>({ ok:false }))
     ]);
     const categoryMap = new Map(categories.map(c=>[c.id, c.name]));
     renderCategories(categories);
     const enriched = txs.map(t=>({ ...t, categoryName: categoryMap.get(t.categoryId)||t.categoryId }));
     renderTransactions(enriched);
+    // render broadcast notice if any
+    try{
+      const wrap = document.getElementById('broadcastNotice');
+      if(wrap){
+        const msg = latestNotice?.latest?.message||'';
+        if(msg){
+          wrap.querySelector('.notice__content').innerHTML = `<strong>公告：</strong>${msg}`;
+          wrap.style.display = 'flex';
+          wrap.querySelector('.notice__actions .ghost')?.addEventListener('click', ()=>{ wrap.style.display='none'; });
+        }else{
+          wrap.style.display = 'none';
+        }
+      }
+    }catch(_){ }
     if($('#statsMode')){ renderChart(); }
     if($('#calendarGrid')){ renderCalendar(enriched); }
   }
@@ -322,36 +338,91 @@
     });
     $('#exportHtmlBtn')?.addEventListener('click', async ()=>{
       const [settings, txs, cats] = await Promise.all([ DB.getSettings?.(), DB.getTransactions(), DB.getCategories() ]);
-      const ym = (()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })();
+      const now = new Date();
+      const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
       const monthTx = txs.filter(t=> (t.date||'').startsWith(ym));
-      const income = monthTx.filter(t=>t.type==='income').reduce((s,t)=> s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
-      const expense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
-      const byCat = new Map();
+      const toBase = (t)=> toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1);
+      const income = monthTx.filter(t=>t.type==='income').reduce((s,t)=> s+toBase(t),0);
+      const expense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s+toBase(t),0);
+      const net = income-expense;
       const catName = (id)=> cats.find(c=>c.id===id)?.name||id;
-      for(const t of monthTx){ if(t.type!=='expense') continue; const v=toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
+      const byCat = new Map();
+      for(const t of monthTx){ if(t.type!=='expense') continue; const v=toBase(t); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
       const catRows = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).map(([id,v])=>`<tr><td>${catName(id)}</td><td style="text-align:right">$${formatAmount(v)}</td></tr>`).join('');
-      const recentRows = monthTx.slice(0,30).map(t=>`<tr><td>${t.date}</td><td>${catName(t.categoryId)}</td><td>${t.note||''}</td><td style="text-align:right">${t.type==='income'?'':'-'}$${formatAmount(toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1))}</td></tr>`).join('');
-      const html = `<!doctype html><html><head><meta charset="utf-8"><title>記帳報告</title>
+      const recentRows = monthTx.slice(0,30).map(t=>`<tr><td>${t.date}</td><td>${catName(t.categoryId)}</td><td>${(t.note||'').replace(/[<>&]/g,'')}</td><td style="text-align:right">${t.type==='income'?'':'-'}$${formatAmount(toBase(t))}</td></tr>`).join('');
+      // Build simple monthly chart for current year
+      const y = String(now.getFullYear());
+      const months = Array.from({length:12}, (_,i)=> `${y}-${String(i+1).padStart(2,'0')}`);
+      const monthData = months.map(m=>{
+        const group = txs.filter(t=> (t.date||'').startsWith(m));
+        const inc = group.filter(t=>t.type==='income').reduce((s,t)=> s+toBase(t),0);
+        const exp = group.filter(t=>t.type==='expense').reduce((s,t)=> s+toBase(t),0);
+        return { label:m.slice(5), value: Math.max(inc-exp, 0) };
+      });
+      const maxV = Math.max(1, ...monthData.map(d=>d.value));
+      const bars = monthData.map(d=>{
+        const h = Math.round((d.value / maxV) * 160) + 8;
+        return `<div class="bar" style="height:${h}px" title="${d.label}: $${formatAmount(d.value)}"></div>`;
+      }).join('');
+      // Try AI analysis
+      let aiText = '';
+      try{
+        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
+        const base = (originOk || '').replace(/\/$/,'');
+        if(base){
+          const resp = await fetch(`${base}/api/ai`,{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              messages:[{ role:'user', content: '請以繁體中文輸出一段針對本月記帳資料的分析，包含：1) 消費概況亮點與異常 2) 前三大分類與建議 3) 下月行動建議（100~180字）。' }],
+              context: { settings, transactions: txs, categories: cats },
+              mode:'chat'
+            })
+          });
+          const j = await resp.json().catch(()=>({}));
+          aiText = (j && j.reply) ? String(j.reply) : '';
+        }
+      }catch(_){ aiText=''; }
+      if(!aiText){
+        // Fallback local analysis
+        const top = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([id,v])=> `${catName(id)}$${formatAmount(v)}`).join('、');
+        aiText = `離線分析：本月結餘 $${formatAmount(net)}。前幾大支出：${top||'無' }。建議設定分類預算與提醒，關注波動較大的項目。`;
+      }
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>iOS 風格記帳報告</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#f8fbff,#eef3f8);color:#0f172a;margin:0;padding:24px}
-          .card{background:rgba(255,255,255,0.7);backdrop-filter:blur(16px) saturate(160%);border:1px solid rgba(2,6,23,0.08);border-radius:16px;box-shadow:0 10px 30px rgba(2,6,23,0.1);padding:16px;margin:12px auto;max-width:880px}
+          :root{ --text:#0f172a; --muted:#475569; --primary:#0ea5e9; --border:rgba(2,6,23,0.08); --glass:rgba(255,255,255,0.7); }
+          @media (prefers-color-scheme: dark){ :root{ --text:#e2e8f0; --muted:#94a3b8; --primary:#38bdf8; --border:rgba(148,163,184,0.18); --glass:rgba(15,23,42,0.6) } }
+          body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;background:
+            radial-gradient(1200px 800px at 15% 10%, rgba(14,165,233,0.14), rgba(14,165,233,0) 55%),
+            radial-gradient(1000px 700px at 85% 90%, rgba(56,189,248,0.16), rgba(56,189,248,0) 55%),
+            linear-gradient(180deg,#f8fbff,#eef3f8);
+            color:var(--text);margin:0;padding:24px }
+          .wrap{max-width:960px;margin:0 auto}
+          .card{background:var(--glass);backdrop-filter:blur(18px) saturate(170%);-webkit-backdrop-filter:blur(18px) saturate(170%);
+            border:1px solid var(--border);border-radius:18px;box-shadow:0 10px 30px rgba(2,6,23,0.12);padding:16px;margin:12px 0;position:relative}
+          .card::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 1px 0 rgba(255,255,255,0.3)}
           h1,h2{margin:0 0 12px}
-          table{width:100%;border-collapse:collapse}
-          th,td{padding:8px;border-bottom:1px solid rgba(2,6,23,0.08)}
-          th{color:#475569;text-align:left;font-weight:600}
+          .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,0.6)}
           .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-          .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid rgba(2,6,23,0.08);background:rgba(255,255,255,0.6)}
-        </style></head><body>
-        <div class="card"><h1>記帳月報</h1><div class="pill">${ym}</div></div>
+          table{width:100%;border-collapse:collapse}
+          th,td{padding:8px;border-bottom:1px solid var(--border)}
+          th{color:var(--muted);text-align:left;font-weight:600}
+          .chart{height:180px;display:grid;align-items:end;gap:6px;grid-auto-flow:column;border-top:1px dashed var(--border);padding-top:12px}
+          .bar{background:linear-gradient(180deg,#22d3ee,#0ea5e9);border-radius:6px;min-width:12px}
+          .muted{color:var(--muted)}
+          .ai{white-space:pre-wrap;line-height:1.6}
+        </style></head><body><div class="wrap">
+        <div class="card"><h1>記帳報告</h1><div class="pill">${ym}</div><div class="muted" style="margin-top:6px">自動產生 • iOS 玻璃風格</div></div>
         <div class="card"><h2>摘要</h2><div class="summary">
           <div><div class="pill">收入 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(income)}</div></div>
           <div><div class="pill">支出 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(expense)}</div></div>
-          <div><div class="pill">結餘 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(income-expense)}</div></div>
+          <div><div class="pill">結餘 (TWD)</div><div style="font-size:22px;font-weight:700;margin-top:6px">$${formatAmount(net)}</div></div>
         </div></div>
+        <div class="card"><h2>月度走勢（淨額）</h2><div class="chart">${bars}</div></div>
+        <div class="card"><h2>AI 分析</h2><div class="ai">${(aiText||'').replace(/</g,'&lt;')}</div></div>
         <div class="card"><h2>分類支出</h2><table><thead><tr><th>分類</th><th style="text-align:right">金額</th></tr></thead><tbody>${catRows||'<tr><td colspan="2">本月尚無支出</td></tr>'}</tbody></table></div>
         <div class="card"><h2>最近交易</h2><table><thead><tr><th>日期</th><th>分類</th><th>備註</th><th style="text-align:right">金額 (TWD)</th></tr></thead><tbody>${recentRows||'<tr><td colspan="4">無資料</td></tr>'}</tbody></table></div>
-      </body></html>`;
+      </div></body></html>`;
       const blob = new Blob([html], { type:'text/html' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -362,15 +433,44 @@
       const file = e.target.files?.[0];
       if(!file) return;
       const text = await file.text();
-      try{
-        const data = JSON.parse(text);
-        const ok = await DB.importAll(data);
-        if(!ok) alert('匯入失敗，格式不正確');
-        await refresh();
-      }catch(err){
-        alert('匯入失敗，檔案非有效 JSON');
+      let parsed=null;
+      try{ parsed = JSON.parse(text); }
+      catch(_){ alert('匯入失敗，檔案非有效 JSON'); e.target.value=''; return; }
+      if(!parsed || !Array.isArray(parsed.categories) || !Array.isArray(parsed.transactions)){
+        alert('匯入失敗，格式不正確（缺少 categories 或 transactions）'); e.target.value=''; return;
       }
-      e.target.value = '';
+      // render preview
+      const dialog = document.getElementById('importPreviewDialog');
+      const form = document.getElementById('importPreviewForm');
+      const body = document.getElementById('importPreviewBody');
+      const cats = Array.isArray(parsed.categories) ? parsed.categories.length : 0;
+      const txs = Array.isArray(parsed.transactions) ? parsed.transactions.length : 0;
+      const settings = parsed.settings ? Object.keys(parsed.settings).length : 0;
+      const model = Array.isArray(parsed.model) ? parsed.model.length : 0;
+      body.innerHTML = `<div class="summary">
+        <div><span class="label">分類</span><span>${cats} 筆</span></div>
+        <div><span class="label">交易</span><span>${txs} 筆</span></div>
+        <div><span class="label">設定</span><span>${settings} 欄位</span></div>
+        <div><span class="label">模型</span><span>${model} 詞</span></div>
+      </div>
+      <div style="margin-top:8px"><small>範例交易：</small><pre style="white-space:pre-wrap;background:transparent">${
+        JSON.stringify(parsed.transactions.slice(0,3),null,2)
+      }</pre></div>`;
+      function showDialogSafe(d){ try{ d.showModal?.(); return; }catch(_){ } try{ d.show?.(); return; }catch(_){ } if(!d.open) d.setAttribute('open',''); }
+      showDialogSafe(dialog);
+      form.onsubmit = async (ev)=>{
+        const submitter = ev.submitter;
+        if(submitter && submitter.value==='cancel'){ return; }
+        ev.preventDefault();
+        try{
+          const ok = await DB.importAll(parsed);
+          if(!ok){ alert('匯入失敗，格式不正確'); return; }
+          dialog.close();
+          await refresh();
+          alert('匯入完成');
+        }catch(_){ alert('匯入失敗'); }
+      };
+      e.target.value='';
     });
 
     // Backup notice
@@ -387,6 +487,66 @@
     if(notice && shouldShowNotice()) notice.style.display='flex';
     dismissBtn?.addEventListener('click', ()=>{ notice.style.display='none'; markNoticeSeen(); });
     exportBtn?.addEventListener('click', ()=>{ document.getElementById('exportJsonBtn')?.click(); markNoticeSeen(); });
+    // Admin broadcast UI
+    (async ()=>{
+      try{
+        const info = await fetch('/api/admin/info').then(r=> r.ok ? r.json() : { ok:false }).catch(()=>({ ok:false }));
+        let isAdmin = Boolean(info && info.ok && info.admin);
+        if(!isAdmin){
+          try{
+            const me = await fetch('/api/me').then(r=> r.ok ? r.json() : { ok:false }).catch(()=>({ ok:false }));
+            const uid = me && me.ok && me.user && me.user.id ? String(me.user.id) : '';
+            if(uid.startsWith('line:') && uid.slice('line:'.length) === ADMIN_LINE_USER_ID){
+              isAdmin = true;
+            }
+          }catch(_){ /* ignore */ }
+        }
+        const wrap = document.getElementById('adminBroadcast');
+        if(isAdmin && wrap){
+          wrap.style.display = '';
+          const input = document.getElementById('adminBroadcastInput');
+          const btn = document.getElementById('adminBroadcastBtn');
+          btn?.addEventListener('click', async ()=>{
+            const text = (input?.value||'').trim();
+            if(!text){ alert('請輸入公告內容'); return; }
+            try{
+              const res = await fetch('/api/admin/broadcast', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ message: text }) });
+              if(!res.ok){ throw new Error('broadcast failed'); }
+              input.value = '';
+              alert('已發送公告');
+              // refresh to display latest notice
+              setTimeout(()=>{ refresh(); }, 200);
+            }catch(err){ alert('發送失敗'); }
+          });
+        }
+        // Model admin
+        const modelWrap = document.getElementById('adminModel');
+        if(isAdmin && modelWrap){
+          modelWrap.style.display = '';
+          const backfillBtn = document.getElementById('modelBackfillBtn');
+          const inspectBtn = document.getElementById('modelInspectBtn');
+          const view = document.getElementById('modelInspectView');
+          backfillBtn?.addEventListener('click', async ()=>{
+            try{
+              const res = await fetch('/api/model/backfill',{ method:'POST' });
+              if(!res.ok) throw new Error('backfill');
+              alert('回填完成');
+            }catch(_){ alert('回填失敗'); }
+          });
+          inspectBtn?.addEventListener('click', async ()=>{
+            try{
+              const res = await fetch('/api/model/inspect');
+              if(!res.ok) throw new Error('inspect');
+              const j = await res.json();
+              const rows = Array.isArray(j.model) ? j.model : [];
+              const html = rows.slice(0,200).map(r=>`<div style="padding:4px 0; border-bottom:1px dashed var(--glass-border)"><strong>${(r.word||'').replace(/[<>&]/g,'')}</strong><br><small>${Object.entries(r.counts||{}).map(([k,v])=>`${k}:${v}`).join(' · ')}</small></div>`).join('') || '<div>目前沒有模型資料</div>';
+              view.style.display='block';
+              view.innerHTML = html;
+            }catch(_){ view.style.display='block'; view.innerHTML='<div>讀取失敗</div>'; }
+          });
+        }
+      }catch(_){ /* not admin */ }
+    })();
 
     $('#cancelEditBtn').addEventListener('click', ()=>{
       clearEditingState();
@@ -491,6 +651,13 @@
       }
 
       quickForm.onsubmit = async (ev)=>{
+        // 支援對話框「取消」按鈕：不要攔截預設關閉
+        const submitter = ev.submitter;
+        if(submitter && submitter.value === 'cancel'){
+          ev.preventDefault();
+          try{ quickDialog.close?.(); }catch(_){ }
+          return;
+        }
         ev.preventDefault();
         const amount = Number(quickAmount.value);
         if(!Number.isFinite(amount) || amount<=0){
@@ -515,6 +682,16 @@
         }
         refresh();
       };
+      // 明確綁定「取消」按鈕關閉（避免瀏覽器差異）
+      const quickCancelBtn = quickDialog?.querySelector('button[value="cancel"]');
+      quickCancelBtn?.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); }catch(_){ }
+        try{ quickDialog.close?.(); }catch(_){ quickDialog.removeAttribute?.('open'); }
+      });
+      // 點擊遮罩關閉
+      quickDialog?.addEventListener('click', (e)=>{
+        if(e.target === quickDialog){ try{ quickDialog.close?.(); }catch(_){ } }
+      });
     });
 
     const currencySel = $('#txCurrency');
@@ -681,6 +858,46 @@
         transactions: await DB.getTransactions(),
         categories: await DB.getCategories()
       };
+      async function streamChat(base, contextObj, userText){
+        try{
+          aiAnswer.innerHTML = '<span class="ai-typing"><i></i><i></i><i></i></span>';
+          const resp2 = await fetch(`${base.replace(/\/$/,'')}/api/ai/stream`,{
+            method:'POST', headers:{ 'Content-Type':'application/json' },
+            body: JSON.stringify({ messages:[{ role:'user', content:userText }], context: contextObj }),
+            signal: aiAbort.signal
+          });
+          if(!resp2.ok || !resp2.body){ return false; }
+          const reader = resp2.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let started = false;
+          while(true){
+            const { done, value } = await reader.read();
+            if(done) break;
+            buffer += decoder.decode(value, { stream:true });
+            const parts = buffer.split(/\n\n/);
+            buffer = parts.pop()||'';
+            for(const chunk of parts){
+              const line = chunk.trim();
+              if(!line) continue;
+              const m = line.match(/^data:\s*(.*)$/m);
+              const payload = m ? m[1] : '';
+              if(!payload) continue;
+              if(payload === '[DONE]') continue;
+              try{
+                const obj = JSON.parse(payload);
+                if(obj && obj.delta){
+                  if(!started){ aiAnswer.textContent=''; started=true; }
+                  aiAnswer.textContent += obj.delta;
+                }
+                if(obj && obj.done){ return true; }
+                if(obj && obj.error){ return false; }
+              }catch(_){ /* ignore */ }
+            }
+          }
+          return true;
+        }catch(err){ return false; }
+      }
       async function autoAddFromText(t){
         const parsed = parseNlp(t);
         // require amount
@@ -765,7 +982,11 @@
         }
         // 如果供應商回覆文字，仍嘗試本地解析新增（以達成你要的自動記帳）
         const ok = await autoAddFromText(text);
-        if(!ok){ aiAnswer.textContent = data?.reply || '沒有回覆'; }
+        if(!ok){
+          // 串流回覆（逐字顯示）；若串流不可用則回退一般回覆
+          const streamed = await streamChat(base, context, text);
+          if(!streamed){ aiAnswer.textContent = data?.reply || '沒有回覆'; }
+        }
       }catch(err){
         // 網路錯誤時改用本地解析
         const ok = await autoAddFromText(text);
@@ -781,21 +1002,61 @@
   function parseNlp(text){
     const t = String(text||'').trim();
     const result = { };
+    const normalized = t.replace(/，/g, ',');
     // type
     if(/(^|\s)(支出|花費|付|花|扣)($|\s)/.test(t)) result.type='expense';
     if(/(^|\s)(收入|入帳|收)($|\s)/.test(t)) result.type='income';
-    // amount
-    const amt = t.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:元|dollars|usd|jpy|eur|twd|cny|hkd)?/i);
-    if(amt) result.amount = Number(amt[1]);
-    // currency
-    const cur = t.match(/\b(TWD|USD|JPY|EUR|CNY|HKD)\b/i);
-    if(cur) result.currency = cur[1].toUpperCase();
+    // currency synonyms
+    const currencySynonyms = [
+      ['TWD', /(TWD|NTD|NT\$|NT|台幣|新台幣|元|塊)/i],
+      ['USD', /(USD|美金|美元)/i],
+      ['JPY', /(JPY|日幣|日元)/i],
+      ['EUR', /(EUR|歐元)/i],
+      ['CNY', /(CNY|人民幣|RMB)/i],
+      ['HKD', /(HKD|港幣)/i]
+    ];
+    for(const [code, rx] of currencySynonyms){ if(rx.test(t)){ result.currency = code; break; } }
+    // amount (supports chinese numerals)
+    function chineseToNumber(input){
+      if(!input) return NaN;
+      const digit = { '零':0,'〇':0,'一':1,'二':2,'兩':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9 };
+      const unit = { '十':10,'百':100,'千':1000,'萬':10000 };
+      let total = 0, section = 0, number = 0;
+      for(const ch of input){
+        if(digit.hasOwnProperty(ch)) number = digit[ch];
+        else if(unit.hasOwnProperty(ch)){
+          const u = unit[ch];
+          if(u===10000){ section += (number||0); total += section*10000; section=0; number=0; }
+          else { section += (number||1)*u; number=0; }
+        }
+      }
+      return total + section + (number||0);
+    }
+    function parseAmount(str){
+      const m = String(str||'').match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/);
+      if(m) return Number(m[1].replace(/,/g,''));
+      const m2 = String(str||'').match(/([零〇一二兩三四五六七八九十百千萬]+)/);
+      if(m2){ const v=chineseToNumber(m2[1]); if(Number.isFinite(v)) return v; }
+      return undefined;
+    }
+    const amt = parseAmount(normalized);
+    if(Number.isFinite(amt)) result.amount = amt;
+    // currency strict code fallback
+    if(!result.currency){ const cur = t.match(/\b(TWD|USD|JPY|EUR|CNY|HKD)\b/i); if(cur) result.currency = cur[1].toUpperCase(); }
     // rate keyword
     const rate = t.match(/匯率\s*([0-9]+(?:\.[0-9]+)?)/);
     if(rate) result.rate = Number(rate[1]);
-    // date ISO
+    // date ISO or relative
     const date = t.match(/(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if(date){ const y=Number(date[1]); const m=String(Number(date[2])).padStart(2,'0'); const d=String(Number(date[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
+    if(!result.date){
+      const now = new Date();
+      const fmt = (d)=> `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      if(/今天/.test(t)) result.date = fmt(new Date());
+      else if(/昨天|昨日/.test(t)){ const d=new Date(now); d.setDate(d.getDate()-1); result.date = fmt(d); }
+      else if(/前天/.test(t)){ const d=new Date(now); d.setDate(d.getDate()-2); result.date = fmt(d); }
+      else if(/明天/.test(t)){ const d=new Date(now); d.setDate(d.getDate()+1); result.date = fmt(d); }
+    }
     // claimed
     if(/已請款|完成請款|報帳完成/.test(t)) result.claimed = true;
     if(/未請款|還沒請款/.test(t)) result.claimed = false;
@@ -1029,8 +1290,16 @@
     });
     const authed = await refreshAuth();
     if(!authed){
-      // 未登入時，停留在頁面，僅顯示登入按鈕，不初始化資料層
-      return;
+      // 未登入：嘗試探測後端是否允許匿名（REQUIRE_AUTH=false）
+      let canAnonymousUse = false;
+      try{
+        const probe = await fetch('/api/categories');
+        canAnonymousUse = probe.ok;
+      }catch(_){ canAnonymousUse = false; }
+      if(!canAnonymousUse){
+        // 仍需登入，維持既有行為（顯示登入按鈕並停止初始化）
+        return;
+      }
     }
     $('#txDate').value = today();
 

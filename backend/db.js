@@ -106,6 +106,11 @@ export const db = {
     const r = await p.query('select web_user_id from user_links where line_user_id=$1', [lineUserId]);
     return r.rows[0]?.web_user_id || null;
   },
+  async listAllLineUserIds(){
+    const p = await getPool();
+    const r = await p.query('select line_user_id from user_links');
+    return r.rows.map(x=> x.line_user_id).filter(Boolean);
+  },
   async createLinkCode(lineUserId, ttlSeconds=300){
     const p = await getPool();
     const code = (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8)).slice(0,10);
