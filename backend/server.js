@@ -502,20 +502,67 @@ function buildClaimAmountPrompt(base, total){
 function parseNlpQuick(text){
   const t = String(text||'').trim();
   const result = { };
-  if(/(^|\s)(支出|花費|付|花|扣)($|\s)/.test(t)) result.type='expense';
-  if(/(^|\s)(收入|入帳|收)($|\s)/.test(t)) result.type='income';
-  const amt = t.match(/([0-9]+(?:\.[0-9]+)?)/);
-  if(amt) result.amount = Number(amt[1]);
-  const cur = t.match(/\b(TWD|USD|JPY|EUR|CNY|HKD)\b/i);
-  if(cur) result.currency = cur[1].toUpperCase();
-  const rate = t.match(/匯率\s*([0-9]+(?:\.[0-9]+)?)/);
+  const normalized = t.replace(/，/g, ',');
+  // type
+  if(/(^|\s)(支出|花費|付|花|扣)($|\s)/.test(t)) result.type = 'expense';
+  if(/(^|\s)(收入|入帳|收)($|\s)/.test(t)) result.type = 'income';
+  // currency synonyms
+  const currencySynonyms = [
+    ['TWD', /(TWD|NTD|NT\$|NT|台幣|新台幣|元|塊)/i],
+    ['USD', /(USD|美金|美元)/i],
+    ['JPY', /(JPY|日幣|日元)/i],
+    ['EUR', /(EUR|歐元)/i],
+    ['CNY', /(CNY|人民幣|RMB)/i],
+    ['HKD', /(HKD|港幣)/i]
+  ];
+  for(const [code, rx] of currencySynonyms){ if(rx.test(t)){ result.currency = code; break; } }
+  // chinese numerals → number
+  function chineseToNumber(input){
+    if(!input) return NaN;
+    const digit = { '零':0,'〇':0,'一':1,'二':2,'兩':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9 };
+    const unit = { '十':10,'百':100,'千':1000,'萬':10000 };
+    let total = 0, section = 0, number = 0;
+    for(const ch of input){
+      if(digit.hasOwnProperty(ch)){
+        number = digit[ch];
+      }else if(unit.hasOwnProperty(ch)){
+        const u = unit[ch];
+        if(u === 10000){ section += (number||0); total += section * 10000; section = 0; number = 0; }
+        else { section += (number||1) * u; number = 0; }
+      }
+    }
+    return total + section + (number||0);
+  }
+  function parseAmount(str){
+    const m = String(str||'').match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/);
+    if(m) return Number(m[1].replace(/,/g,''));
+    const m2 = String(str||'').match(/([零〇一二兩三四五六七八九十百千萬]+)/);
+    if(m2){ const v = chineseToNumber(m2[1]); if(Number.isFinite(v)) return v; }
+    return undefined;
+  }
+  // amount
+  const amount = parseAmount(normalized);
+  if(Number.isFinite(amount)) result.amount = amount;
+  // rate
+  const rate = normalized.match(/匯率\s*([0-9]+(?:\.[0-9]+)?)/);
   if(rate) result.rate = Number(rate[1]);
-  const date = t.match(/(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})/);
-  if(date){ const y=Number(date[1]); const m=String(Number(date[2])).padStart(2,'0'); const d=String(Number(date[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
-  const camt = t.match(/請款\s*([0-9]+(?:\.[0-9]+)?)/);
-  if(camt) result.claimAmount = Number(camt[1]);
+  // date: ISO or relative
+  const iso = normalized.match(/(20\d{2})[-\/]?(\d{1,2})[-\/]?(\d{1,2})/);
+  if(iso){ const y=Number(iso[1]); const m=String(Number(iso[2])).padStart(2,'0'); const d=String(Number(iso[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
+  if(!result.date){
+    const now = new Date();
+    const fmt = (d)=> `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    if(/今天/.test(t)) result.date = fmt(new Date());
+    else if(/昨天|昨日/.test(t)){ const d=new Date(now); d.setDate(d.getDate()-1); result.date = fmt(d); }
+    else if(/前天/.test(t)){ const d=new Date(now); d.setDate(d.getDate()-2); result.date = fmt(d); }
+    else if(/明天/.test(t)){ const d=new Date(now); d.setDate(d.getDate()+1); result.date = fmt(d); }
+  }
+  // claim amount
+  const claim = normalized.match(/請款\s*([0-9,\.零〇一二兩三四五六七八九十百千萬]+)/);
+  if(claim){ const v = parseAmount(claim[1]); if(Number.isFinite(v)) result.claimAmount = v; }
   if(/已請款|完成請款|報帳完成/.test(t)) result.claimed = true;
   if(/未請款|還沒請款/.test(t)) result.claimed = false;
+  // note
   result.note = t;
   return result;
 }
@@ -528,7 +575,7 @@ async function aiStructParse(text, context){
   const payload = {
     model: OPENAI_MODEL,
     messages: [
-      { role:'system', content:'你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD), categoryName(string), rate(number,可省略), claimAmount(number,可省略), claimed(boolean,可省略), note(string)。只輸出 JSON，不要其他文字。'},
+      { role:'system', content:'你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。欄位: type(income|expense; 預設 expense), amount(number), currency(string; 例如 TWD USD), date(YYYY-MM-DD; 支援 今天/昨天/前天/明天 相對日期), categoryName(string), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。金額可含逗號或中文數字（如 一百二十/兩百），幣別同義字（台幣/新台幣/NT/NTD/NT$ 視為 TWD）。無法判斷的欄位請省略。只輸出 JSON。'},
       { role:'user', content: text }
     ],
     temperature: 0.2
