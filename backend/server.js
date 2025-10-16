@@ -34,6 +34,7 @@ const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH||'false').toLowerCase()==='
 const LINE_LOGIN_CHANNEL_ID = process.env.LINE_LOGIN_CHANNEL_ID || '';
 const LINE_LOGIN_CHANNEL_SECRET = process.env.LINE_LOGIN_CHANNEL_SECRET || '';
 const LINE_LOGIN_REDIRECT_URI = process.env.LINE_LOGIN_REDIRECT_URI || '';
+const ADMIN_LINE_USER_ID = process.env.ADMIN_LINE_USER_ID || 'U5c7738d89a59ff402fd6b56f5472d351';
 
 // In-memory store (demo only)
 const store = {
@@ -321,6 +322,20 @@ async function lineReply(replyToken, messages){
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}` },
       body: JSON.stringify(payload)
+    }, 10000);
+    return true;
+  }catch(_){ return false; }
+}
+
+async function linePush(to, messages){
+  if(!LINE_CHANNEL_ACCESS_TOKEN){
+    try{ console.warn && console.warn('[line] push skipped: missing LINE_CHANNEL_ACCESS_TOKEN'); }catch(_){ }
+    return false;
+  }
+  const payload = { to, messages };
+  try{
+    await fetchJson('https://api.line.me/v2/bot/message/push', {
+      method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}` }, body: JSON.stringify(payload)
     }, 10000);
     return true;
   }catch(_){ return false; }
@@ -759,6 +774,79 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && reqPath === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true }));
+    }
+
+    // Admin broadcast (protected by LINE admin user id in cookie-mapped session OR query token)
+    if (req.method === 'POST' && reqPath === '/api/admin/broadcast'){
+      const raw = await parseBody(req);
+      const body = JSON.parse(raw.toString('utf-8')||'{}');
+      const { message='' } = body||{};
+      // Admin check: if logged-in LINE account equals admin line user id OR if X-Admin-Key matches env secret
+      const ADMIN_KEY = process.env.ADMIN_KEY || '';
+      const user = getUserFromRequest(req);
+      const isAdminByKey = ADMIN_KEY && (String(req.headers['x-admin-key']||'')===ADMIN_KEY);
+      let isAdminByLine = false;
+      try{
+        // find if current session is a LINE login with admin id
+        // we do not store raw line id in session, so fallback: allow anonymous by header key only
+        const cookies = parseCookies(req);
+        const sid = verifySigned(cookies['session']||'');
+        if(sid){
+          const s = sessions.get(sid);
+          const uid = s?.user?.id||'';
+          if(uid && uid.startsWith('line:')){
+            const raw = uid.slice('line:'.length);
+            isAdminByLine = (raw===ADMIN_LINE_USER_ID);
+          }
+        }
+      }catch(_){ }
+      if(!(isAdminByKey || isAdminByLine)){
+        res.writeHead(403, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'forbidden' }));
+      }
+      if(!String(message).trim()){
+        res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'empty_message' }));
+      }
+      // Push to all known LINE user ids (linked users). If DB disabled, load from shared links file.
+      let targets = [];
+      try{
+        if(isDbEnabled()){
+          const ids = await pgdb.listAllLineUserIds();
+          targets = Array.isArray(ids)?ids:[];
+        }else{
+          const map = readJson(sharedPath('links.json'), {});
+          targets = Object.keys(map||{});
+        }
+      }catch(_){ targets = []; }
+      // Fallback: if no targets, but admin id exists, at least send to admin
+      if(targets.length===0 && ADMIN_LINE_USER_ID){ targets=[ADMIN_LINE_USER_ID]; }
+      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'系統公告', subtitle: new Date().toLocaleString('zh-TW'), lines:[ String(message) ], buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri: getBaseUrl(req)||'https://example.com' } } ], showHero:false, compact:true });
+      let success=0;
+      for(const to of targets){
+        const ok = await linePush(to, [{ type:'flex', altText:'系統公告', contents:bubble }]);
+        if(ok) success++;
+      }
+      // Store latest notice for frontend fetch
+      try{
+        const data = readJson(sharedPath('notice.json'), {});
+        data.latest = { message:String(message), date: new Date().toISOString() };
+        writeJson(sharedPath('notice.json'), data);
+      }catch(_){ }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, sent: success, total: targets.length }));
+    }
+
+    // Public endpoint: get latest notice (for web UI)
+    if (req.method === 'GET' && reqPath === '/api/notice/latest'){
+      try{
+        const data = readJson(sharedPath('notice.json'), {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, latest: data.latest||null }));
+      }catch(_){
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, latest:null }));
+      }
     }
 
     // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
