@@ -117,6 +117,48 @@ const fileStore = {
   importAll(userId, data){ if(!data||!Array.isArray(data.categories)||!Array.isArray(data.transactions)) return false; const dir=userDirFor(userId); writeJson(path.join(dir,'categories.json'), data.categories); writeJson(path.join(dir,'transactions.json'), data.transactions); if(data.settings){ writeJson(path.join(dir,'settings.json'), { key:'app', ...data.settings }); } if(Array.isArray(data.model)){ writeJson(path.join(dir,'model.json'), data.model); } return true; }
 };
 
+// File-based link store for mapping LINE bot user <-> web login user when DATABASE_URL is not set
+const SHARED_DATA_DIR = path.resolve(DATA_BASE, '..'); // e.g. data/
+function sharedPath(name){ ensureDir(SHARED_DATA_DIR); return path.join(SHARED_DATA_DIR, name); }
+const linkStore = {
+  getLinkedWebUser(lineUserId){
+    try{
+      const map = readJson(sharedPath('links.json'), {});
+      return map[lineUserId] || null;
+    }catch(_){ return null; }
+  },
+  upsertLink(lineUserId, webUserId){
+    try{
+      const map = readJson(sharedPath('links.json'), {});
+      map[lineUserId] = webUserId;
+      writeJson(sharedPath('links.json'), map);
+      return true;
+    }catch(_){ return false; }
+  },
+  createLinkCode(lineUserId, ttlSeconds=300){
+    try{
+      const codes = readJson(sharedPath('link_codes.json'), {});
+      const code = (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8)).slice(0,10);
+      const exp = Date.now() + ttlSeconds*1000;
+      codes[code] = { line_user_id: lineUserId, expires_at: exp };
+      writeJson(sharedPath('link_codes.json'), codes);
+      return code;
+    }catch(_){ return ''; }
+  },
+  consumeLinkCode(code){
+    try{
+      const codes = readJson(sharedPath('link_codes.json'), {});
+      const rec = codes[code];
+      if(!rec){ return null; }
+      if(!(Number(rec.expires_at)||0 > Date.now())){ delete codes[code]; writeJson(sharedPath('link_codes.json'), codes); return null; }
+      const lineUserId = rec.line_user_id || null;
+      delete codes[code];
+      writeJson(sharedPath('link_codes.json'), codes);
+      return lineUserId;
+    }catch(_){ return null; }
+  }
+};
+
 // Simple in-memory session store (for single-instance). For production multi-instance, use shared store.
 const sessions = new Map(); // sessionId -> { user, createdAt }
 
@@ -194,7 +236,8 @@ function setCors(res) {
 
 function getBaseUrl(req){
   try{
-    const proto = (req.headers['x-forwarded-proto']||'https').toString();
+    const protoHeader = (req.headers['x-forwarded-proto']||'').toString();
+    const proto = protoHeader || (req.socket && req.socket.encrypted ? 'https' : 'http');
     const host = (req.headers['x-forwarded-host']||req.headers.host||'').toString();
     if(host){ return `${proto}://${host}`; }
   }catch(_){ }
@@ -239,7 +282,10 @@ function verifyLineSignature(rawBody, signature) {
 }
 
 async function lineReply(replyToken, messages){
-  if(!LINE_CHANNEL_ACCESS_TOKEN){ return false; }
+  if(!LINE_CHANNEL_ACCESS_TOKEN){
+    try{ console.warn && console.warn('[line] reply skipped: missing LINE_CHANNEL_ACCESS_TOKEN'); }catch(_){ }
+    return false;
+  }
   const payload = { replyToken, messages };
   try{
     await fetchJson('https://api.line.me/v2/bot/message/reply', {
@@ -249,6 +295,33 @@ async function lineReply(replyToken, messages){
     }, 10000);
     return true;
   }catch(_){ return false; }
+}
+
+// Build a glass-style Flex bubble approximating iOS frosted glass aesthetics
+function glassFlexBubble({ baseUrl='', title='', subtitle='', lines=[], buttons=[] }){
+  const isHttps = /^https:\/\//.test(baseUrl||'');
+  const heroUrl = isHttps ? `${baseUrl}/flex-glass.svg` : '';
+  const bodyContents = [];
+  if(title){ bodyContents.push({ type:'text', text:String(title), weight:'bold', size:'xl', color:'#0f172a' }); }
+  if(subtitle){ bodyContents.push({ type:'text', text:String(subtitle), size:'sm', color:'#475569', wrap:true, margin:'sm' }); }
+  if(Array.isArray(lines) && lines.length>0){
+    bodyContents.push({
+      type:'box', layout:'vertical', spacing:'sm', paddingAll:'12px', backgroundColor:'#ffffffcc', cornerRadius:'12px', contents:
+        lines.map(t=>({ type:'text', text:String(t), size:'sm', color:'#0f172a', wrap:true }))
+    });
+  }
+  const footerContents = (buttons||[]).map(btn=>({
+    type:'button',
+    style: btn.style||'primary',
+    color: btn.color||'#0ea5e9',
+    action: btn.action
+  }));
+  return {
+    type:'bubble',
+    hero: heroUrl ? { type:'image', url: heroUrl, size:'full', aspectRatio:'20:10', aspectMode:'cover' } : undefined,
+    body:{ type:'box', layout:'vertical', spacing:'sm', contents: bodyContents },
+    footer: footerContents.length>0 ? { type:'box', layout:'vertical', spacing:'md', contents: footerContents, flex:0 } : undefined
+  };
 }
 
 function parseNlpQuick(text){
@@ -303,7 +376,7 @@ function todayYmd(){ const d=new Date(); return `${d.getFullYear()}-${String(d.g
 
 async function handleStatsQuery(userId, text){
   const lower = String(text||'').toLowerCase();
-  const txs = await (isDbEnabled() ? pgdb.getTransactions(userId) : []);
+  const txs = await (isDbEnabled() ? pgdb.getTransactions(userId) : fileStore.getTransactions(userId||'anonymous'));
   const ym = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
   const monthTx = txs.filter(t=> (t.date||'').startsWith(ym));
   const sum = (arr)=> arr.reduce((s,t)=> s + ((Number(t.amount)||0) * (t.type==='income'?1:-1)), 0);
@@ -314,7 +387,7 @@ async function handleStatsQuery(userId, text){
   const catM = text.match(/(本月|這月).*?(餐飲|交通|購物|薪資)/);
   if(catM){
     const name = catM[2];
-    const cats = await (isDbEnabled()? pgdb.getCategories() : []);
+    const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
     const hit = cats.find(c=> c.name===name);
     const used = monthTx.filter(t=> t.type==='expense' && (t.categoryId===hit?.id || t.categoryName===name));
     const val = used.reduce((s,t)=> s + (Number(t.amount)||0), 0);
@@ -338,6 +411,8 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     const reqPath = url.pathname;
+    const normPath = String(reqPath || '').replace(/\/+$/,'').toLowerCase();
+    try{ console.log('[req]', req.method, reqPath); }catch(_){ }
 
     // LINE Login start
     if (req.method === 'GET' && reqPath === '/auth/line/start'){
@@ -402,15 +477,26 @@ const server = http.createServer(async (req, res) => {
       };
       const sid = crypto.randomBytes(16).toString('hex');
       sessions.set(sid, { user, createdAt: Date.now() });
-      setCookie(res, 'session', createSigned(sid), { maxAge: 60*60*24*7 });
+      // 在本機開發（http）時不要加 Secure，否則瀏覽器不會儲存 cookie
+      const isHttps = /^https:\/\//.test(getBaseUrl(req)||'');
+      setCookie(res, 'session', createSigned(sid), { maxAge: 60*60*24*7, secure: isHttps });
       // Consume link code (if present in state) to bind LINE bot user to this web account
       try{
         const parts = parsed.split('|');
         const pair = parts.find(p=> p && p.startsWith('link='));
-        if(pair && isDbEnabled()){
+        if(pair){
           const codeStr = pair.slice('link='.length);
-          const lineUid = await pgdb.consumeLinkCode(codeStr);
-          if(lineUid){ await pgdb.upsertLink(lineUid, user.id); }
+          if(isDbEnabled()){
+            const lineUid = await pgdb.consumeLinkCode(codeStr);
+            if(lineUid){ await pgdb.upsertLink(lineUid, user.id); }
+          } else {
+            const lineUid = linkStore.consumeLinkCode(codeStr);
+            if(lineUid){
+              linkStore.upsertLink(lineUid, user.id);
+              // move existing local data from LINE user bucket to web user bucket if needed
+              try{ fileStore.migrateUserData(lineUid, user.id); }catch(_){ }
+            }
+          }
         }
       }catch(_){ }
       // File-based migration: move from legacy IDs to new LINE-based ID if present
@@ -576,8 +662,8 @@ const server = http.createServer(async (req, res) => {
 
     // Transactions
     if (req.method === 'GET' && reqPath === '/api/transactions'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify([])); } }
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify([])); } }
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const rows = await pgdb.getTransactions(user?.id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -590,10 +676,10 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'POST' && reqPath === '/api/transactions'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); } }
       const raw = await parseBody(req);
       const payload = JSON.parse(raw.toString('utf-8') || '{}');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const rec = await pgdb.addTransaction(user?.id, payload);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -606,9 +692,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'GET' && reqPath.startsWith('/api/transactions/')){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const rec = await pgdb.getTransactionById(user?.id, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -621,11 +707,11 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'PUT' && reqPath.startsWith('/api/transactions/')){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const rec = await pgdb.updateTransaction(user?.id, id, patch);
         if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
@@ -640,9 +726,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'DELETE' && reqPath.startsWith('/api/transactions/')){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         await pgdb.deleteTransaction(user?.id, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -657,8 +743,8 @@ const server = http.createServer(async (req, res) => {
 
     // Settings
     if (req.method === 'GET' && reqPath === '/api/settings'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({})); } }
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({})); } }
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const s = await pgdb.getSettings(user?.id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -671,10 +757,10 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'PUT' && reqPath === '/api/settings'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({})); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({})); } }
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const next = await pgdb.setSettings(user?.id, patch);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -689,10 +775,10 @@ const server = http.createServer(async (req, res) => {
 
     // Model
     if (req.method === 'POST' && reqPath === '/api/model/update'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const raw = await parseBody(req);
       const { note='', categoryId='' } = JSON.parse(raw.toString('utf-8')||'{}');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         await pgdb.updateCategoryModelFromNote(user?.id, note, categoryId);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -705,10 +791,10 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === 'POST' && reqPath === '/api/model/suggest'){
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const raw = await parseBody(req);
       const { note='' } = JSON.parse(raw.toString('utf-8')||'{}');
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const catId = await pgdb.suggestCategoryFromNote(user?.id, note);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -722,8 +808,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && reqPath === '/api/sync/export') {
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         const data = await pgdb.exportAll(user?.id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -737,14 +823,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && reqPath === '/api/sync/import') {
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const raw = await parseBody(req);
       const data = JSON.parse(raw.toString('utf-8') || '{}');
       if (!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: false, error: 'invalid payload' }));
       }
-      const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+      const user = getUserFromRequest(req);
       if(isDbEnabled()){
         await pgdb.importAll(user?.id, data);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -757,10 +843,16 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const isLineWebhookPath = (reqPath === '/line/webhook' || reqPath === '/line/webhook/');
+    const isLineWebhookPath = (normPath === '/line/webhook' || normPath.startsWith('/line/webhook/'));
+    // Some platforms (and LINE verify button) may send a GET to verify availability
+    if (req.method === 'GET' && isLineWebhookPath){
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, method:'GET' }));
+    }
     if (req.method === 'POST' && isLineWebhookPath) {
       const raw = await parseBody(req);
       const sig = req.headers['x-line-signature'];
+      try{ console.log('[line] webhook hit', { method:req.method, sig: !!sig, rawBytes: raw?.length||0 }); }catch(_){ }
       if (!verifyLineSignature(raw, typeof sig === 'string' ? sig : '')) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: false, error: 'signature invalid' }));
@@ -771,29 +863,25 @@ const server = http.createServer(async (req, res) => {
       // Handle message events
       for(const ev of events){
         try{
+          try{ console.log('[line] event', { type: ev.type, msg: ev.message?.text, hasToken: !!LINE_CHANNEL_ACCESS_TOKEN, db: isDbEnabled() }); }catch(_){ }
           // Follow event: send binding Flex message
           if(ev.type==='follow'){
             const lineUidRaw = ev.source?.userId || '';
-            if(isDbEnabled() && lineUidRaw){
-              const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
+            if(lineUidRaw){
               const base = getBaseUrl(req) || '';
-              const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
-              const flex = {
-                type:'flex', altText:'綁定帳號', contents:{
-                  type:'bubble',
-                  hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
-                  body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
-                    { type:'text', text:'綁定帳號', weight:'bold', size:'xl', color:'#0f172a' },
-                    { type:'text', text:'點擊下方按鈕開啟網站並登入，即可完成綁定。完成後可直接用 LINE 記帳與查詢統計。', wrap:true, size:'sm', color:'#64748b' }
-                  ]},
-                  footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
-                    { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往綁定', uri: linkUrl } },
-                    { type:'separator' },
-                    { type:'button', style:'link', action:{ type:'uri', label:'瞭解更多', uri: `${getBaseUrl(req)}` } }
-                  ], flex:0 }
+              if(isDbEnabled()){
+                const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
+                const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
+                const bubble = glassFlexBubble({ baseUrl: base, title: '綁定帳號', subtitle: '登入網站即可完成綁定', lines:[ '完成後可直接用 LINE 記帳與查詢統計。' ], buttons:[ { style:'primary', action:{ type:'uri', label:'前往綁定', uri: linkUrl } }, { style:'link', action:{ type:'uri', label:'瞭解更多', uri: base||'https://example.com' } } ] });
+                await lineReply(ev.replyToken, [{ type:'flex', altText:'綁定帳號', contents:bubble }]);
+              } else {
+                const code = linkStore.createLinkCode(`line:${lineUidRaw}`, 900);
+                if(code){
+                  const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
+                  const bubble = glassFlexBubble({ baseUrl: base, title: '綁定帳號', subtitle: '登入網站即可完成綁定', lines:[ '完成後可直接用 LINE 記帳與查詢統計。' ], buttons:[ { style:'primary', action:{ type:'uri', label:'前往綁定', uri: linkUrl } } ] });
+                  await lineReply(ev.replyToken, [{ type:'flex', altText:'綁定帳號', contents:bubble }]);
                 }
-              };
-              await lineReply(ev.replyToken, [flex]);
+              }
             }
             continue;
           }
@@ -803,9 +891,14 @@ const server = http.createServer(async (req, res) => {
             let userId = lineUidRaw ? `line:${lineUidRaw}` : null;
             // if link table exists and has mapping, use mapped web user id
             try{
-              if(isDbEnabled() && lineUidRaw){
-                const mapped = await pgdb.getLinkedWebUser(`line:${lineUidRaw}`);
-                if(mapped) userId = mapped;
+              if(lineUidRaw){
+                if(isDbEnabled()){
+                  const mapped = await pgdb.getLinkedWebUser(`line:${lineUidRaw}`);
+                  if(mapped) userId = mapped;
+                } else {
+                  const mapped = linkStore.getLinkedWebUser(`line:${lineUidRaw}`);
+                  if(mapped) userId = mapped;
+                }
               }
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
@@ -813,53 +906,152 @@ const server = http.createServer(async (req, res) => {
             if(normalized==='綁定' || normalized==='绑定'){
               if(!isDbEnabled() && lineUidRaw){
                 const base = getBaseUrl(req) || '';
-                const linkUrl = `${base}/auth/line/start`;
-                const flex = {
-                  type:'flex', altText:'登入即可共用資料', contents:{
-                    type:'bubble',
-                    hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
-                    body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
-                      { type:'text', text:'登入即可共用資料', weight:'bold', size:'xl', color:'#0f172a' },
-                      { type:'text', text:'目前使用檔案持久化，不需綁定。請點擊下方按鈕用 LINE 登入網站，即可與 Bot 共用同一份資料。', wrap:true, size:'sm', color:'#64748b' }
-                    ]},
-                    footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
-                      { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往登入', uri: linkUrl } }
-                    ], flex:0 }
-                  }
-                };
-                await lineReply(replyToken, [flex]);
+                const code = linkStore.createLinkCode(`line:${lineUidRaw}`, 900);
+                const linkUrl = `${base}/auth/line/start${code?`?link=${encodeURIComponent(code)}`:''}`;
+                const bubble = glassFlexBubble({ baseUrl: base, title:'綁定帳號', subtitle:'登入網站即可完成綁定', lines:[ '完成後可直接用 LINE 記帳與查詢統計。' ], buttons:[ { style:'primary', action:{ type:'uri', label:'前往綁定', uri: linkUrl } } ] });
+                await lineReply(replyToken, [{ type:'flex', altText:'綁定帳號', contents:bubble }]);
                 continue;
               }
               if(isDbEnabled() && lineUidRaw){
                 const code = await pgdb.createLinkCode(`line:${lineUidRaw}`, 900);
                 const base = getBaseUrl(req) || '';
                 const linkUrl = `${base}/auth/line/start?link=${encodeURIComponent(code)}`;
-                const flex = {
-                  type:'flex', altText:'綁定帳號', contents:{
-                    type:'bubble',
-                    hero:{ type:'image', url: `${getBaseUrl(req)}/flex-glass.svg`, size:'full', aspectRatio:'20:10', aspectMode:'cover' },
-                    body:{ type:'box', layout:'vertical', spacing:'sm', contents:[
-                      { type:'text', text:'綁定帳號', weight:'bold', size:'xl', color:'#0f172a' },
-                      { type:'text', text:'點擊下方按鈕開啟網站並登入，即可完成綁定。完成後可直接用 LINE 記帳與查詢統計。', wrap:true, size:'sm', color:'#64748b' }
-                    ]},
-                    footer:{ type:'box', layout:'vertical', spacing:'md', contents:[
-                      { type:'button', style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往綁定', uri: linkUrl } },
-                      { type:'separator' },
-                      { type:'button', style:'link', action:{ type:'uri', label:'瞭解更多', uri: `${base}` } }
-                    ], flex:0 }
-                  }
-                };
-                await lineReply(replyToken, [flex]);
+                const bubble = glassFlexBubble({ baseUrl: base, title:'綁定帳號', subtitle:'登入網站即可完成綁定', lines:[ '完成後可直接用 LINE 記帳與查詢統計。' ], buttons:[ { style:'primary', action:{ type:'uri', label:'前往綁定', uri: linkUrl } }, { style:'link', action:{ type:'uri', label:'瞭解更多', uri: base||'https://example.com' } } ] });
+                await lineReply(replyToken, [{ type:'flex', altText:'綁定帳號', contents:bubble }]);
                 continue;
               } else {
-                // DB 未啟用或未取得使用者 ID，回覆指引
-                await lineReply(replyToken, [{ type:'text', text:'請先完成系統設定後再輸入「綁定」。如需協助請告知管理者。' }]);
+                // DB 未啟用或未取得使用者 ID，回覆指引（Flex + 按鈕）
+                const base = getBaseUrl(req) || '';
+                const bubble = glassFlexBubble({
+                  baseUrl: base,
+                  title: '需要系統設定',
+                  subtitle: '請先設定資料庫或完成登入綁定',
+                  lines: ['請先完成系統設定後再輸入「綁定」。如需協助請告知管理者。'],
+                  buttons: [
+                    { style:'primary', color:'#0ea5e9', action:{ type:'uri', label:'前往登入', uri: `${base||'https://example.com'}` } },
+                    { style:'link', action:{ type:'message', label:'使用說明', text:'使用說明' } }
+                  ]
+                });
+                await lineReply(replyToken, [{ type:'flex', altText:'需要系統設定', contents:bubble }]);
                 continue;
               }
             }
-            // Quick intent: stats
+            // Quick intent: stats → 回覆玻璃風格 Flex
             const stats = await handleStatsQuery(userId, text);
-            if(stats){ await lineReply(replyToken, [{ type:'text', text: stats }]); continue; }
+            if(stats){
+              const bubble = glassFlexBubble({
+                baseUrl: getBaseUrl(req),
+                title: '統計摘要',
+                subtitle: '本月收入/支出/結餘',
+                lines: [stats],
+                buttons:[
+                  { style:'primary', action:{ type:'message', label:'最近交易', text:'最近交易' } },
+                  { style:'link', action:{ type:'message', label:'分類支出', text:'分類支出' } }
+                ]
+              });
+              await lineReply(replyToken, [{ type:'flex', altText: '統計摘要', contents: bubble }]);
+              continue;
+            }
+
+            // 最近交易（前 10 筆）
+            if(/最近(交易|紀錄)/.test(text)){
+              try{ console.log('[line] intent: recent_transactions'); }catch(_){ }
+              if(isDbEnabled()){
+                const txs = await pgdb.getTransactions(userId);
+                const cats = await pgdb.getCategories();
+                const map = new Map(cats.map(c=>[c.id,c.name]));
+                const items = txs.slice(0,10);
+                const bubbles = items.map(t=> glassFlexBubble({
+                  baseUrl: getBaseUrl(req),
+                  title: t.type==='income' ? '收入' : '支出',
+                  subtitle: `${t.date} ・ ${map.get(t.categoryId)||t.categoryId}`,
+                  lines: [
+                    `金額：${t.currency||'TWD'} ${Number(t.amount||0).toFixed(2)}`,
+                    (Number(t.claimAmount||0)>0) ? `請款：${t.currency||'TWD'} ${Number(t.claimAmount||0).toFixed(2)}` : undefined,
+                    t.claimed ? '狀態：已請款' : (t.type==='expense' ? '狀態：未請款' : undefined),
+                    t.note ? `備註：${t.note}` : undefined
+                  ].filter(Boolean)
+                }));
+                const contents = bubbles.length>1 ? { type:'carousel', contents:bubbles } : bubbles[0]||glassFlexBubble({ baseUrl:getBaseUrl(req), title:'最近交易', subtitle:'沒有資料', lines:['目前沒有交易'] });
+                await lineReply(replyToken, [{ type:'flex', altText:'最近交易', contents }]);
+            }else{
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const txs = fileStore.getTransactions(uid);
+              const cats = fileStore.getCategories(uid);
+              const map = new Map(cats.map(c=>[c.id,c.name]));
+              const items = txs.slice(0,10);
+              const bubbles = items.map(t=> glassFlexBubble({
+                baseUrl: getBaseUrl(req),
+                title: t.type==='income' ? '收入' : '支出',
+                subtitle: `${t.date} ・ ${map.get(t.categoryId)||t.categoryId}`,
+                lines: [
+                  `金額：${t.currency||'TWD'} ${Number(t.amount||0).toFixed(2)}`,
+                  (Number(t.claimAmount||0)>0) ? `請款：${t.currency||'TWD'} ${Number(t.claimAmount||0).toFixed(2)}` : undefined,
+                  t.claimed ? '狀態：已請款' : (t.type==='expense' ? '狀態：未請款' : undefined),
+                  t.note ? `備註：${t.note}` : undefined
+                ].filter(Boolean)
+              }));
+              const contents = bubbles.length>1 ? { type:'carousel', contents:bubbles } : bubbles[0]||glassFlexBubble({ baseUrl:getBaseUrl(req), title:'最近交易', subtitle:'沒有資料', lines:['目前沒有交易'] });
+              await lineReply(replyToken, [{ type:'flex', altText:'最近交易', contents }]);
+              }
+              continue;
+            }
+
+            // 未請款（前 10 筆）
+            if(/未請款/.test(text)){
+              if(isDbEnabled()){
+                const txs = await pgdb.getTransactions(userId);
+                const cats = await pgdb.getCategories();
+                const map = new Map(cats.map(c=>[c.id,c.name]));
+                const items = txs.filter(t=> t.type==='expense' && t.claimed!==true).slice(0,10);
+                const lines = items.length>0 ? items.map(t=> `${t.date}｜${map.get(t.categoryId)||t.categoryId}｜${t.currency||'TWD'} ${Number(t.amount||0).toFixed(2)}`) : ['目前沒有未請款項目'];
+                const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'未請款清單', subtitle:`筆數：${items.length}（最多顯示 10 筆）`, lines, buttons:[ { style:'link', action:{ type:'message', label:'最近交易', text:'最近交易' } } ] });
+                await lineReply(replyToken, [{ type:'flex', altText:'未請款清單', contents:bubble }]);
+            }else{
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const txs = fileStore.getTransactions(uid);
+              const cats = fileStore.getCategories(uid);
+              const map = new Map(cats.map(c=>[c.id,c.name]));
+              const items = txs.filter(t=> t.type==='expense' && t.claimed!==true).slice(0,10);
+              const lines = items.length>0 ? items.map(t=> `${t.date}｜${map.get(t.categoryId)||t.categoryId}｜${t.currency||'TWD'} ${Number(t.amount||0).toFixed(2)}`) : ['目前沒有未請款項目'];
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'未請款清單', subtitle:`筆數：${items.length}（最多顯示 10 筆）`, lines, buttons:[ { style:'link', action:{ type:'message', label:'最近交易', text:'最近交易' } } ] });
+              await lineReply(replyToken, [{ type:'flex', altText:'未請款清單', contents:bubble }]);
+              }
+              continue;
+            }
+
+            // 分類支出（本月 Top 10）
+            if(/(分類|類別).*支出/.test(text)){
+              if(isDbEnabled()){
+                const txs = await pgdb.getTransactions(userId);
+                const cats = await pgdb.getCategories();
+                const map = new Map(cats.map(c=>[c.id,c.name]));
+                const now = new Date();
+                const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+                const monthTx = txs.filter(t=> (t.date||'').startsWith(ym) && t.type==='expense');
+                const sums = new Map();
+                for(const t of monthTx){ sums.set(t.categoryId, (sums.get(t.categoryId)||0) + Number(t.amount||0)); }
+                const rows = Array.from(sums.entries()).sort((a,b)=> b[1]-a[1]).slice(0,10);
+                const lines = rows.length>0 ? rows.map(([id,val])=> `${map.get(id)||id}：$${Number(val||0).toFixed(2)}`) : ['本月尚無支出'];
+                const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'分類支出（本月）', subtitle: ym, lines });
+                await lineReply(replyToken, [{ type:'flex', altText:'分類支出', contents:bubble }]);
+            }else{
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const txs = fileStore.getTransactions(uid);
+              const cats = fileStore.getCategories(uid);
+              const map = new Map(cats.map(c=>[c.id,c.name]));
+              const now = new Date();
+              const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+              const monthTx = txs.filter(t=> (t.date||'').startsWith(ym) && t.type==='expense');
+              const sums = new Map();
+              for(const t of monthTx){ sums.set(t.categoryId, (sums.get(t.categoryId)||0) + Number(t.amount||0)); }
+              const rows = Array.from(sums.entries()).sort((a,b)=> b[1]-a[1]).slice(0,10);
+              const lines = rows.length>0 ? rows.map(([id,val])=> `${map.get(id)||id}：$${Number(val||0).toFixed(2)}`) : ['本月尚無支出'];
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'分類支出（本月）', subtitle: ym, lines });
+              await lineReply(replyToken, [{ type:'flex', altText:'分類支出', contents:bubble }]);
+              }
+              continue;
+            }
             // Try AI struct parse first
             let parsed = await aiStructParse(text, {});
             if(!parsed){ parsed = parseNlpQuick(text); }
@@ -878,23 +1070,45 @@ const server = http.createServer(async (req, res) => {
               // try category inference by name
               if(parsed.categoryName){
                 try{
-                  const cats = await (isDbEnabled()? pgdb.getCategories() : []);
+                  const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
                   const hit = cats.find(c=> String(c.name).toLowerCase()===String(parsed.categoryName).toLowerCase());
                   if(hit) payload.categoryId = hit.id;
                 }catch(_){ }
               }
               // fallback to first category if empty
               if(!payload.categoryId){
-                try{ const cats = await (isDbEnabled()? pgdb.getCategories() : []); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
+                try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
               }
               if(isDbEnabled()){
                 await pgdb.addTransaction(userId, payload);
+              } else {
+                const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                try{ fileStore.addTransaction(uid, payload); }catch(_){ }
               }
-              await lineReply(replyToken, [{ type:'text', text: `已記${payload.type==='income'?'收入':'支出'} $${payload.amount}（${payload.currency}）` }]);
+              const bubble = glassFlexBubble({
+                baseUrl: getBaseUrl(req),
+                title: payload.type==='income' ? '已記收入' : '已記支出',
+                subtitle: payload.date,
+                lines: [
+                  `金額：${payload.currency} ${Number(payload.amount||0).toFixed(2)}`,
+                  (Number(payload.claimAmount||0)>0) ? `請款：${payload.currency} ${Number(payload.claimAmount||0).toFixed(2)}` : undefined,
+                  payload.claimed ? '狀態：已請款' : (payload.type==='expense' ? '狀態：未請款' : undefined),
+                  payload.note ? `備註：${payload.note}` : undefined
+                ].filter(Boolean)
+              });
+              await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
               continue;
             }
             // Fallback help
-            await lineReply(replyToken, [{ type:'text', text:'可以直接輸入：「支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款」，或問「這月支出多少？」\n若要把 LINE 與網頁帳號綁定，請輸入：綁定' }]);
+            {
+              const lines = [
+                '記帳：支出 120 餐飲 早餐 2025-10-12',
+                '查詢：這月支出多少？',
+                '清單：最近交易、未請款、分類支出'
+              ];
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'可用指令', subtitle:'也支援自然語言', lines });
+              await lineReply(replyToken, [{ type:'flex', altText:'使用說明', contents:bubble }]);
+            }
           }
         }catch(err){ try{ console.error('line handle error', err); }catch(_){ } }
       }
@@ -916,7 +1130,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+    return res.end(JSON.stringify({ ok: false, error: 'not_found', path: reqPath, method: req.method }));
   } catch (err) {
     console.error(err);
     res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
