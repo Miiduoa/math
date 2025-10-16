@@ -35,6 +35,12 @@ const LINE_LOGIN_CHANNEL_ID = process.env.LINE_LOGIN_CHANNEL_ID || '';
 const LINE_LOGIN_CHANNEL_SECRET = process.env.LINE_LOGIN_CHANNEL_SECRET || '';
 const LINE_LOGIN_REDIRECT_URI = process.env.LINE_LOGIN_REDIRECT_URI || '';
 const ADMIN_LINE_USER_ID = process.env.ADMIN_LINE_USER_ID || 'U5c7738d89a59ff402fd6b56f5472d351';
+// Local model trainer scheduling
+const MODEL_TRAIN_INTERVAL_MS = Number(process.env.MODEL_TRAIN_INTERVAL_MS || 300000); // default 5 min
+const MODEL_TRAIN_ON_START = String(process.env.MODEL_TRAIN_ON_START||'true').toLowerCase()==='true';
+const MODEL_TRAIN_USE_AI = String(process.env.MODEL_TRAIN_USE_AI||'true').toLowerCase()==='true';
+const MODEL_TRAIN_AI_MAX_PER_CYCLE = Number(process.env.MODEL_TRAIN_AI_MAX_PER_CYCLE || 20);
+const MODEL_TRAIN_RECENT_DAYS = Number(process.env.MODEL_TRAIN_RECENT_DAYS || 7);
 
 // In-memory store (demo only)
 const store = {
@@ -182,6 +188,92 @@ async function trainModelFor(userIdOrUid, note, categoryId){
       await fileStore.updateCategoryModelFromNote(userIdOrUid||'anonymous', note, categoryId);
     }
   }catch(_){ /* ignore training errors */ }
+}
+
+async function backfillAllUsers(){
+  try{
+    if(isDbEnabled()){
+      const p = await pgdb.getPool();
+      // list distinct user ids (including null)
+      const r = await p.query("select coalesce(user_id,'anonymous') as uid from transactions group by uid limit 10000");
+      const uids = r.rows.map(x=> x.uid);
+      for(const uid of uids){
+        const rows = await pgdb.getTransactions(uid);
+        let aiCount = 0;
+        for(const t of rows){
+          if(!(t && t.note)) continue;
+          // skip if older than recent days (YYYY-MM-DD)
+          if(MODEL_TRAIN_RECENT_DAYS>0 && t.date){
+            try{
+              const d = new Date(t.date);
+              if(Number.isFinite(d.getTime())){
+                const diff = Date.now() - d.getTime();
+                if(diff > MODEL_TRAIN_RECENT_DAYS*86400000) continue;
+              }
+            }catch(_){ }
+          }
+          let cat = t.categoryId;
+          // If configured, ask ChatGPT for category suggestion to enrich local model
+          if(MODEL_TRAIN_USE_AI && aiCount < MODEL_TRAIN_AI_MAX_PER_CYCLE){
+            try{
+              const ai = await aiStructParse(t.note, {});
+              if(ai && ai.categoryName){
+                const cats = await pgdb.getCategories();
+                const hit = cats.find(c=> String(c.name).toLowerCase()===String(ai.categoryName).toLowerCase());
+                if(hit) cat = hit.id;
+              }
+              aiCount++;
+            }catch(_){ /* ignore */ }
+          }
+          if(cat){ await pgdb.updateCategoryModelFromNote(uid, t.note, cat); }
+        }
+      }
+    }else{
+      // scan local data users directory
+      const base = DATA_BASE;
+      let entries=[];
+      try{ entries = fs.readdirSync(base, { withFileTypes:true }); }catch(_){ entries=[]; }
+      const dirs = entries.filter(d=> d && d.isDirectory && d.isDirectory()).map(d=> d.name);
+      for(const name of dirs){
+        const uid = name;
+        const rows = fileStore.getTransactions(uid);
+        let aiCount = 0;
+        for(const t of rows){
+          if(!(t && t.note)) continue;
+          if(MODEL_TRAIN_RECENT_DAYS>0 && t.date){
+            try{
+              const d = new Date(t.date);
+              if(Number.isFinite(d.getTime())){
+                const diff = Date.now() - d.getTime();
+                if(diff > MODEL_TRAIN_RECENT_DAYS*86400000) continue;
+              }
+            }catch(_){ }
+          }
+          let cat = t.categoryId;
+          if(MODEL_TRAIN_USE_AI && aiCount < MODEL_TRAIN_AI_MAX_PER_CYCLE){
+            try{
+              const ai = await aiStructParse(t.note, {});
+              if(ai && ai.categoryName){
+                const cats = fileStore.getCategories(uid);
+                const hit = cats.find(c=> String(c.name).toLowerCase()===String(ai.categoryName).toLowerCase());
+                if(hit) cat = hit.id;
+              }
+              aiCount++;
+            }catch(_){ }
+          }
+          if(cat){ await fileStore.updateCategoryModelFromNote(uid, t.note, cat); }
+        }
+      }
+    }
+    return true;
+  }catch(_){ return false; }
+}
+
+function startModelTrainer(){
+  if(MODEL_TRAIN_ON_START){ try{ backfillAllUsers(); }catch(_){ } }
+  if(Number.isFinite(MODEL_TRAIN_INTERVAL_MS) && MODEL_TRAIN_INTERVAL_MS>0){
+    setInterval(()=>{ try{ backfillAllUsers(); }catch(_){ } }, MODEL_TRAIN_INTERVAL_MS);
+  }
 }
 
 function b64url(input){
@@ -2193,6 +2285,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[ledger-backend] Listening on http://localhost:${PORT}`);
+  // kick off background trainer
+  try{ startModelTrainer(); }catch(_){ }
 });
 
 function heuristicReply(messages, context){
