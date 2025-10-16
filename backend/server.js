@@ -525,6 +525,7 @@ const guidedFlow = new Map(); // userId -> { step, payload }
 // AI contextual intent support (in-memory, single instance)
 const aiPending = new Map(); // actionId -> { userId, kind: 'add_tx'|'delete_tx', payload?, txId? }
 const aiLastTxId = new Map(); // userId -> last transaction id added via AI
+const adminState = new Map(); // userId -> { mode: 'broadcast_wait' }
 
 function newActionId(){
   try{ return crypto.randomBytes(10).toString('hex'); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2,10); }
@@ -566,6 +567,27 @@ function buildAiConfirmDeleteBubble(base, tx, actionId){
     buttons: [
       { style:'primary', color:'#dc2626', action:{ type:'postback', label:'確認刪除', data:`flow=ai&step=delete&action=${encodeURIComponent(actionId)}&do=1` } },
       { style:'link', action:{ type:'postback', label:'取消', data:`flow=ai&step=cancel&action=${encodeURIComponent(actionId)}` } }
+    ],
+    showHero:false,
+    compact:true
+  });
+}
+
+function isLineAdmin(lineUidRaw){
+  try{ return !!lineUidRaw && (String(lineUidRaw)===String(ADMIN_LINE_USER_ID)); }catch(_){ return false; }
+}
+
+function adminMenuBubble({ baseUrl='' }){
+  return glassFlexBubble({
+    baseUrl,
+    title:'管理選單',
+    subtitle:'僅管理者可用',
+    lines:['可執行系統廣播與模型管理'],
+    buttons:[
+      { style:'primary', action:{ type:'postback', label:'發送廣播', data:'flow=admin&step=broadcast' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'回填訓練', data:'flow=admin&step=backfill' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'查看模型', data:'flow=admin&step=inspect' } },
+      { style:'link', action:{ type:'postback', label:'關閉', data:'flow=admin&step=cancel' } }
     ],
     showHero:false,
     compact:true
@@ -1661,6 +1683,67 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
+            // Admin actions
+            if(flow==='admin'){
+              const replyToken = ev.replyToken;
+              const lineUidRaw = ev.source?.userId || '';
+              if(!isLineAdmin(lineUidRaw)){
+                const bubble = glassFlexBubble({ baseUrl:base, title:'權限不足', subtitle:'僅管理者可用', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'權限不足', contents:bubble }]);
+                continue;
+              }
+              const step = String(dataObj.step||'');
+              if(step==='cancel'){
+                adminState.delete(`line:${lineUidRaw}`);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已關閉', subtitle:'', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已關閉', contents:bubble }]);
+                continue;
+              }
+              if(step==='broadcast'){
+                adminState.set(`line:${lineUidRaw}`, { mode:'broadcast_wait' });
+                const bubble = glassFlexBubble({ baseUrl:base, title:'輸入廣播內容', subtitle:'請直接輸入文字訊息', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'輸入廣播內容', contents:bubble }]);
+                continue;
+              }
+              if(step==='backfill'){
+                // trigger backfill
+                try{
+                  if(isDbEnabled()){
+                    const user = getUserFromRequest(req);
+                    const rows = await pgdb.getTransactions(user?.id);
+                    for(const t of rows){ if(t && t.note && t.categoryId){ await pgdb.updateCategoryModelFromNote(user?.id, t.note, t.categoryId); } }
+                  }else{
+                    // For non-auth: run global backfill routine
+                    await backfillAllUsers();
+                  }
+                  const bubble = glassFlexBubble({ baseUrl:base, title:'回填已啟動', subtitle:'數分鐘內完成', lines:[], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'回填已啟動', contents:bubble }]);
+                }catch(_){
+                  const bubble = glassFlexBubble({ baseUrl:base, title:'回填失敗', subtitle:'請稍後再試', lines:[], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'回填失敗', contents:bubble }]);
+                }
+                continue;
+              }
+              if(step==='inspect'){
+                try{
+                  let lines=[];
+                  if(isDbEnabled()){
+                    const user = getUserFromRequest(req);
+                    const rows = await pgdb._getAllModel(user?.id);
+                    const top = rows.slice(0,10).map(r=> `${r.word}: ${Object.entries(r.counts||{}).slice(0,3).map(([k,v])=>`${k}:${v}`).join(' ')}`);
+                    lines = top.length?top:['目前沒有模型資料'];
+                  }else{
+                    lines = ['檔案模式不提供模型摘要'];
+                  }
+                  const bubble = glassFlexBubble({ baseUrl:base, title:'模型摘要（前 10）', subtitle:new Date().toLocaleString('zh-TW'), lines, showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'模型摘要', contents:bubble }]);
+                }catch(_){
+                  const bubble = glassFlexBubble({ baseUrl:base, title:'讀取失敗', subtitle:'請稍後再試', lines:[], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'讀取失敗', contents:bubble }]);
+                }
+                continue;
+              }
+            }
             // AI contextual postbacks
             if(flow==='ai'){
               const action = String(dataObj.action||'');
@@ -1918,6 +2001,36 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            // Admin: open menu or broadcast input handler
+            if(isLineAdmin(lineUidRaw)){
+              if(/^管理$|^admin$/i.test(text)){
+                const bubble = adminMenuBubble({ baseUrl:getBaseUrl(req)||'' });
+                await lineReply(replyToken, [{ type:'flex', altText:'管理選單', contents:bubble }]);
+                continue;
+              }
+              const astate = adminState.get(`line:${lineUidRaw}`);
+              if(astate && astate.mode==='broadcast_wait'){
+                // send broadcast
+                try{
+                  // collect targets
+                  let targets = [];
+                  if(isDbEnabled()){
+                    const ids = await pgdb.listAllLineUserIds();
+                    targets = Array.isArray(ids)?ids:[];
+                  }else{
+                    const map = readJson(sharedPath('links.json'), {});
+                    targets = Object.keys(map||{});
+                  }
+                  if(targets.length===0 && ADMIN_LINE_USER_ID){ targets=[ADMIN_LINE_USER_ID]; }
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'系統公告', subtitle: new Date().toLocaleString('zh-TW'), lines:[ String(text) ], showHero:false, compact:true });
+                  let success=0;
+                  for(const to of targets){ const ok = await linePush(to, [{ type:'flex', altText:'系統公告', contents:bubble }]); if(ok) success++; }
+                  adminState.delete(`line:${lineUidRaw}`);
+                  await lineReply(replyToken, [{ type:'text', text:`已發送公告：${success}/${targets.length}` }]);
+                }catch(_){ await lineReply(replyToken, [{ type:'text', text:'發送失敗' }]); }
+                continue;
+              }
+            }
             // First: contextual AI handler (fraud/revert etc.)
             {
               const handled = await handleContextualAI(req, replyToken, userId, lineUidRaw, text);
