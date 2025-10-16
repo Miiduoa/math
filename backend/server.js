@@ -412,6 +412,113 @@ function menuFlexBubble({ baseUrl='' }){
 // Simple in-memory guided add flow state
 const guidedFlow = new Map(); // userId -> { step, payload }
 
+// AI contextual intent support (in-memory, single instance)
+const aiPending = new Map(); // actionId -> { userId, kind: 'add_tx'|'delete_tx', payload?, txId? }
+const aiLastTxId = new Map(); // userId -> last transaction id added via AI
+
+function newActionId(){
+  try{ return crypto.randomBytes(10).toString('hex'); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2,10); }
+}
+
+function summarizeTxLines(tx, cats){
+  const name = (cats && Array.isArray(cats)) ? (cats.find(c=>c.id===tx.categoryId)?.name || tx.categoryId) : (tx.categoryId||'');
+  const lines = [
+    `日期：${tx.date||todayYmd()}`,
+    `金額：${tx.currency||'TWD'} ${Number(tx.amount||0).toFixed(2)}`,
+    name ? `分類：${name}` : undefined,
+    tx.note ? `備註：${String(tx.note).slice(0,60)}` : undefined
+  ].filter(Boolean);
+  return lines;
+}
+
+function buildAiConfirmAddBubble(base, payload, actionId){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '偵測到支出，是否新增？',
+    subtitle: 'AI 已解析，請確認或調整',
+    lines: summarizeTxLines({ ...payload }, null),
+    buttons: [
+      { style:'primary', action:{ type:'postback', label:'確認新增', data:`flow=ai&step=add&action=${encodeURIComponent(actionId)}&do=1` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'選擇分類', data:`flow=ai&step=choose_cat&action=${encodeURIComponent(actionId)}` } },
+      { style:'link', action:{ type:'postback', label:'取消', data:`flow=ai&step=cancel&action=${encodeURIComponent(actionId)}` } }
+    ],
+    showHero:false,
+    compact:true
+  });
+}
+
+function buildAiConfirmDeleteBubble(base, tx, actionId){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '是否刪除上一筆？',
+    subtitle: '偵測到你想撤回/更正',
+    lines: summarizeTxLines(tx, null),
+    buttons: [
+      { style:'primary', color:'#dc2626', action:{ type:'postback', label:'確認刪除', data:`flow=ai&step=delete&action=${encodeURIComponent(actionId)}&do=1` } },
+      { style:'link', action:{ type:'postback', label:'取消', data:`flow=ai&step=cancel&action=${encodeURIComponent(actionId)}` } }
+    ],
+    showHero:false,
+    compact:true
+  });
+}
+
+async function handleContextualAI(req, replyToken, userId, lineUidRaw, text){
+  try{
+    const t = String(text||'');
+    const base = getBaseUrl(req)||'';
+    const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+    const lower = t.toLowerCase();
+
+    // Case A: possible fraud/large unexpected loss
+    const isFraud = /(詐騙|被騙|盜刷|詐欺|騙走)/.test(t);
+    if(isFraud){
+      // Prefer AI struct parse to extract amount/date/note
+      let parsed = await aiStructParse(t, {});
+      if(!parsed){ parsed = parseNlpQuick(t); }
+      const amt = Number(parsed?.amount||0);
+      if(Number.isFinite(amt) && amt>0){
+        const payload = {
+          date: parsed.date || todayYmd(),
+          type: 'expense',
+          categoryId: '', // 由使用者後續選擇或使用預設
+          currency: parsed.currency || 'TWD',
+          rate: Number(parsed.rate)||1,
+          amount: amt,
+          claimAmount: Number(parsed.claimAmount)||0,
+          claimed: parsed.claimed===true,
+          note: String(parsed.note||t||'')
+        };
+        const actionId = newActionId();
+        aiPending.set(actionId, { userId: uid, kind:'add_tx', payload });
+        const bubble = buildAiConfirmAddBubble(base, payload, actionId);
+        await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]);
+        return true;
+      }
+    }
+
+    // Case B: user says it was a misunderstanding/cancel → offer to delete last AI-added tx
+    const isRevert = /(誤會|不用了|取消|撤回|搞錯|不是)/.test(t);
+    if(isRevert){
+      const lastId = aiLastTxId.get(uid);
+      if(lastId){
+        let tx = null;
+        try{
+          if(isDbEnabled()) tx = await pgdb.getTransactionById(uid, lastId);
+          else tx = fileStore.getTransactionById(uid, lastId);
+        }catch(_){ tx=null; }
+        if(tx){
+          const actionId = newActionId();
+          aiPending.set(actionId, { userId: uid, kind:'delete_tx', txId: lastId });
+          const bubble = buildAiConfirmDeleteBubble(base, tx, actionId);
+          await lineReply(replyToken, [{ type:'flex', altText:'確認刪除', contents:bubble }]);
+          return true;
+        }
+      }
+    }
+  }catch(_){ }
+  return false;
+}
+
 function parsePostbackData(s){
   const params = new URLSearchParams(String(s||''));
   const out = {};
@@ -445,6 +552,22 @@ async function buildCategoryPrompt(base, isDb, userIdOrUid){
     subtitle:'請選擇分類',
     lines:[],
     buttons: buttons.concat([{ style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } }]),
+    showHero:false,
+    compact:true
+  });
+}
+
+async function buildAiChooseCategoryPrompt(base, isDb, userIdOrUid, actionId){
+  let cats=[];
+  try{ cats = isDb ? (await pgdb.getCategories()) : fileStore.getCategories(userIdOrUid||'anonymous'); }catch(_){ cats=[]; }
+  const top = cats.slice(0,10);
+  const buttons = top.map(c=> ({ style:'secondary', color:'#64748b', action:{ type:'postback', label:c.name, data:`flow=ai&step=choose_cat_do&action=${encodeURIComponent(actionId)}&id=${encodeURIComponent(c.id)}` } }));
+  return glassFlexBubble({
+    baseUrl: base,
+    title:'選擇分類',
+    subtitle:'請選擇分類以完成新增',
+    lines:[],
+    buttons: buttons.concat([{ style:'link', action:{ type:'postback', label:'取消', data:`flow=ai&step=cancel&action=${encodeURIComponent(actionId)}` } }]),
     showHero:false,
     compact:true
   });
@@ -1231,6 +1354,75 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
+            // AI contextual postbacks
+            if(flow==='ai'){
+              const action = String(dataObj.action||'');
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const rec = action ? aiPending.get(action) : null;
+              // cancel
+              if(dataObj.step==='cancel' && rec && rec.userId===uid){
+                aiPending.delete(action);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已取消', subtitle:'已中止動作', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已取消', contents:bubble }]);
+                continue;
+              }
+              // confirm add
+              if(dataObj.step==='add' && dataObj.do==='1' && rec && rec.userId===uid && rec.kind==='add_tx'){
+                const payload = { ...rec.payload };
+                // fallback category if empty
+                if(!payload.categoryId){
+                  try{
+                    const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid));
+                    payload.categoryId = cats[0]?.id || 'food';
+                  }catch(_){ payload.categoryId = 'food'; }
+                }
+                let created=null;
+                if(isDbEnabled()){
+                  created = await pgdb.addTransaction(userId, payload);
+                }else{
+                  created = fileStore.addTransaction(uid, payload);
+                }
+                if(created?.id){ aiLastTxId.set(uid, created.id); }
+                aiPending.delete(action);
+                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines({ ...payload, categoryId: payload.categoryId }, null), showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
+                continue;
+              }
+              // choose category → prompt
+              if(dataObj.step==='choose_cat' && rec && rec.userId===uid && rec.kind==='add_tx'){
+                const bubble = await buildAiChooseCategoryPrompt(base, isDbEnabled(), userId||uid, action);
+                await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                continue;
+              }
+              // choose category do → add
+              if(dataObj.step==='choose_cat_do' && dataObj.id && rec && rec.userId===uid && rec.kind==='add_tx'){
+                const catId = String(dataObj.id);
+                const payload = { ...rec.payload, categoryId: catId };
+                let created=null;
+                if(isDbEnabled()){
+                  created = await pgdb.addTransaction(userId, payload);
+                }else{
+                  created = fileStore.addTransaction(uid, payload);
+                }
+                if(created?.id){ aiLastTxId.set(uid, created.id); }
+                aiPending.delete(action);
+                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines(payload, null), showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
+                continue;
+              }
+              // confirm delete
+              if(dataObj.step==='delete' && dataObj.do==='1' && rec && rec.userId===uid && rec.kind==='delete_tx'){
+                const id = rec.txId || '';
+                try{
+                  if(isDbEnabled()) await pgdb.deleteTransaction(userId, id);
+                  else fileStore.deleteTransaction(uid, id);
+                }catch(_){ }
+                aiPending.delete(action);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已刪除', subtitle:'上一筆已刪除', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'刪除完成', contents:bubble }]);
+                continue;
+              }
+            }
             if(flow==='add'){
               const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
               let state = guidedFlow.get(uid) || { step:'amount', payload:{ type:'expense', currency:'TWD', rate:1 } };
@@ -1364,6 +1556,11 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            // First: contextual AI handler (fraud/revert etc.)
+            {
+              const handled = await handleContextualAI(req, replyToken, userId, lineUidRaw, text);
+              if(handled){ continue; }
+            }
             // If user is in guided flow, handle by step
             {
               const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
