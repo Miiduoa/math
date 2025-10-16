@@ -248,7 +248,7 @@ function reqUserId(req){
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Line-Signature');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Line-Signature, X-Admin-Key');
 }
 
 function getBaseUrl(req){
@@ -847,6 +847,29 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, latest:null }));
       }
+    }
+
+    // Admin info: whether current session is admin (for frontend UI gating)
+    if (req.method === 'GET' && reqPath === '/api/admin/info'){
+      const ADMIN_KEY = process.env.ADMIN_KEY || '';
+      const user = getUserFromRequest(req);
+      let isAdminByLine = false;
+      try{
+        const cookies = parseCookies(req);
+        const sid = verifySigned(cookies['session']||'');
+        if(sid){
+          const s = sessions.get(sid);
+          const uid = s?.user?.id||'';
+          if(uid && uid.startsWith('line:')){
+            const raw = uid.slice('line:'.length);
+            isAdminByLine = (raw===ADMIN_LINE_USER_ID);
+          }
+        }
+      }catch(_){ }
+      const hasKey = ADMIN_KEY && String(req.headers['x-admin-key']||'')===ADMIN_KEY;
+      const admin = Boolean(isAdminByLine || hasKey);
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok:true, admin }));
     }
 
     // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
