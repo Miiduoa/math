@@ -462,6 +462,58 @@ function buildAiConfirmDeleteBubble(base, tx, actionId){
   });
 }
 
+// Edit (multi-turn) state for LINE
+const editState = new Map(); // userId -> { txId, step: 'edit_amount'|'edit_date'|'edit_note' }
+
+async function getLastTransactionRecord(userIdOrUid){
+  try{
+    if(isDbEnabled()){
+      const rows = await pgdb.getTransactions(userIdOrUid);
+      return rows && rows[0] ? rows[0] : null;
+    }else{
+      const rows = fileStore.getTransactions(userIdOrUid||'anonymous');
+      return rows && rows[0] ? rows[0] : null;
+    }
+  }catch(_){ return null; }
+}
+
+function buildEditMenuBubble(base, tx, txId){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '編輯這筆交易',
+    subtitle: tx?.date || todayYmd(),
+    lines: summarizeTxLines(tx||{}, null),
+    buttons: [
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'改分類', data:`flow=edit&step=choose_cat&tx=${encodeURIComponent(txId)}` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'改金額', data:`flow=edit&step=amount&tx=${encodeURIComponent(txId)}` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'改日期', data:`flow=edit&step=date&tx=${encodeURIComponent(txId)}` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'改備註', data:`flow=edit&step=note&tx=${encodeURIComponent(txId)}` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'標記已請款', data:`flow=edit&step=claimed&tx=${encodeURIComponent(txId)}&val=1` } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'標記未請款', data:`flow=edit&step=claimed&tx=${encodeURIComponent(txId)}&val=0` } },
+      { style:'link', action:{ type:'postback', label:'完成', data:`flow=edit&step=cancel&tx=${encodeURIComponent(txId)}` } }
+    ],
+    showHero:false,
+    compact:true
+  });
+}
+
+function buildEditPromptBubble(base, kind, txId){
+  const title = kind==='amount' ? '輸入新金額'
+    : kind==='date' ? '輸入新日期'
+    : '輸入新備註';
+  const subtitle = kind==='amount' ? '範例：120 或 85.5'
+    : kind==='date' ? '格式：YYYY-MM-DD，或「今天/昨天/前天/明天」'
+    : '請直接輸入文字（最多 200 字）';
+  return glassFlexBubble({
+    baseUrl: base,
+    title, subtitle,
+    lines: [],
+    buttons: [ { style:'link', action:{ type:'postback', label:'取消', data:`flow=edit&step=cancel&tx=${encodeURIComponent(txId)}` } } ],
+    showHero:false,
+    compact:true
+  });
+}
+
 async function handleContextualAI(req, replyToken, userId, lineUidRaw, text){
   try{
     const t = String(text||'');
@@ -568,6 +620,22 @@ async function buildAiChooseCategoryPrompt(base, isDb, userIdOrUid, actionId){
     subtitle:'請選擇分類以完成新增',
     lines:[],
     buttons: buttons.concat([{ style:'link', action:{ type:'postback', label:'取消', data:`flow=ai&step=cancel&action=${encodeURIComponent(actionId)}` } }]),
+    showHero:false,
+    compact:true
+  });
+}
+
+async function buildEditChooseCategoryPrompt(base, isDb, userIdOrUid, txId){
+  let cats=[];
+  try{ cats = isDb ? (await pgdb.getCategories()) : fileStore.getCategories(userIdOrUid||'anonymous'); }catch(_){ cats=[]; }
+  const top = cats.slice(0,10);
+  const buttons = top.map(c=> ({ style:'secondary', color:'#64748b', action:{ type:'postback', label:c.name, data:`flow=edit&step=choose_cat_do&tx=${encodeURIComponent(txId)}&id=${encodeURIComponent(c.id)}` } }));
+  return glassFlexBubble({
+    baseUrl: base,
+    title:'選擇分類',
+    subtitle:'請選擇新的分類',
+    lines:[],
+    buttons: buttons.concat([{ style:'link', action:{ type:'postback', label:'取消', data:`flow=edit&step=cancel&tx=${encodeURIComponent(txId)}` } }]),
     showHero:false,
     compact:true
   });
@@ -939,6 +1007,92 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:false, error:'ai_provider', detail: String(err?.message||err) }));
       }
+    }
+
+    // AI streaming (SSE)
+    if (req.method === 'POST' && reqPath === '/api/ai/stream') {
+      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); } }
+      const raw = await parseBody(req);
+      const body = JSON.parse(raw.toString('utf-8') || '{}');
+      const { messages = [], context = {} } = body || {};
+
+      const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+      // Prepare SSE response
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive'
+      });
+      const sse = (obj)=>{ try{ res.write(`data: ${JSON.stringify(obj)}\n\n`); }catch(_){ } };
+      let closed = false;
+      req.on('close', ()=>{ closed = true; try{ res.end(); }catch(_){ } });
+
+      // Fallback streaming when no key: stream heuristic reply in chunks
+      if(!OPENAI_API_KEY){
+        try{
+          const reply = heuristicReply(messages, context) || '（離線模式）';
+          const parts = String(reply).split(/(\s+)/).filter(Boolean);
+          for(const p of parts){ if(closed) break; sse({ delta: p }); await new Promise(r=>setTimeout(r, 20)); }
+          if(!closed) sse({ done:true });
+        }catch(_){ try{ sse({ error:'stream_offline_failed' }); }catch(_){ } }
+        return; // keep connection open until client closes
+      }
+
+      // Upstream OpenAI-compatible streaming
+      try{
+        const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
+        const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+        const endpoint = new URL(`${apiBase}/chat/completions`);
+        const payload = {
+          model: OPENAI_MODEL,
+          messages: [
+            { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
+            { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
+            ...messages
+          ],
+          temperature: 0.4,
+          stream: true
+        };
+        const reqUp = https.request({
+          hostname: endpoint.hostname,
+          path: endpoint.pathname + endpoint.search,
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }, (resp)=>{
+          resp.setEncoding('utf8');
+          let buffer = '';
+          resp.on('data', (chunk)=>{
+            buffer += chunk;
+            const lines = buffer.split(/\n/);
+            buffer = lines.pop()||'';
+            for(const line of lines){
+              const trimmed = line.trim();
+              if(!trimmed) continue;
+              if(trimmed.startsWith('data:')){
+                const data = trimmed.slice(5).trim();
+                if(data === '[DONE]'){ sse({ done:true }); return; }
+                try{
+                  const json = JSON.parse(data);
+                  const delta = json?.choices?.[0]?.delta?.content || '';
+                  if(delta){ sse({ delta }); }
+                }catch(_){ /* ignore */ }
+              }
+            }
+          });
+          resp.on('end', ()=>{ try{ sse({ done:true }); }catch(_){ } });
+        });
+        reqUp.on('error', ()=>{ try{ sse({ error:'upstream_error' }); }catch(_){ } });
+        reqUp.write(JSON.stringify(payload));
+        reqUp.end();
+      }catch(_){ try{ sse({ error:'stream_init_failed' }); }catch(_){ } }
+
+      return; // keep SSE open
     }
 
     if (req.method === 'GET' && reqPath === '/health') {
@@ -1384,7 +1538,7 @@ const server = http.createServer(async (req, res) => {
                 }
                 if(created?.id){ aiLastTxId.set(uid, created.id); }
                 aiPending.delete(action);
-                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines({ ...payload, categoryId: payload.categoryId }, null), showHero:false, compact:true });
+                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines({ ...payload, categoryId: payload.categoryId }, null), buttons:[ { style:'secondary', color:'#64748b', action:{ type:'postback', label:'編輯這筆', data:`flow=edit&step=amount&tx=${encodeURIComponent(created?.id||'')}` } } ], showHero:false, compact:true });
                 await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
                 continue;
               }
@@ -1406,7 +1560,7 @@ const server = http.createServer(async (req, res) => {
                 }
                 if(created?.id){ aiLastTxId.set(uid, created.id); }
                 aiPending.delete(action);
-                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines(payload, null), showHero:false, compact:true });
+                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines: summarizeTxLines(payload, null), buttons:[ { style:'secondary', color:'#64748b', action:{ type:'postback', label:'編輯這筆', data:`flow=edit&step=amount&tx=${encodeURIComponent(created?.id||'')}` } } ], showHero:false, compact:true });
                 await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
                 continue;
               }
@@ -1489,6 +1643,61 @@ const server = http.createServer(async (req, res) => {
                 continue;
               }
             }
+            // Edit flow (multi-turn)
+            if(flow==='edit'){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const txId = String(dataObj.tx||'');
+              const step = String(dataObj.step||'');
+              if(step==='cancel'){
+                editState.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'編輯完成', subtitle:'已離開編輯模式', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'編輯完成', contents:bubble }]);
+                continue;
+              }
+              if(!txId){
+                const bubble = glassFlexBubble({ baseUrl:base, title:'找不到交易', subtitle:'請從「最近交易」選擇後再試', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'找不到交易', contents:bubble }]);
+                continue;
+              }
+              if(step==='choose_cat'){
+                const bubble = await buildEditChooseCategoryPrompt(base, isDbEnabled(), userId||uid, txId);
+                await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                continue;
+              }
+              if(step==='choose_cat_do' && dataObj.id){
+                const catId = String(dataObj.id);
+                try{
+                  if(isDbEnabled()){
+                    await pgdb.updateTransaction(userId, txId, { categoryId: catId });
+                  }else{
+                    fileStore.updateTransaction(uid, txId, { categoryId: catId });
+                  }
+                }catch(_){ }
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已更新分類', subtitle:'', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已更新', contents:bubble }]);
+                continue;
+              }
+              if(step==='amount' || step==='date' || step==='note'){
+                editState.set(uid, { txId, step: `edit_${step}` });
+                const bubble = buildEditPromptBubble(base, step, txId);
+                await lineReply(replyToken, [{ type:'flex', altText:'輸入新值', contents:bubble }]);
+                continue;
+              }
+              if(step==='claimed'){
+                const val = String(dataObj.val||'');
+                const claimed = val==='1';
+                try{
+                  if(isDbEnabled()){
+                    await pgdb.updateTransaction(userId, txId, { claimed });
+                  }else{
+                    fileStore.updateTransaction(uid, txId, { claimed });
+                  }
+                }catch(_){ }
+                const bubble = glassFlexBubble({ baseUrl:base, title: claimed?'已標記為已請款':'已標記為未請款', subtitle:'', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已更新', contents:bubble }]);
+                continue;
+              }
+            }
             // Menu postback fallthrough
             if(dataObj && dataObj.flow==='menu'){
               const bubble = menuFlexBubble({ baseUrl: getBaseUrl(req)||'' });
@@ -1560,6 +1769,44 @@ const server = http.createServer(async (req, res) => {
             {
               const handled = await handleContextualAI(req, replyToken, userId, lineUidRaw, text);
               if(handled){ continue; }
+            }
+            // If in edit mode waiting for user input
+            {
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const st = editState.get(uid);
+              if(st && st.txId && /^edit_/.test(st.step||'')){
+                const kind = st.step.replace(/^edit_/, '');
+                let patch = {};
+                if(kind==='amount'){
+                  const n = Number(text.match(/([0-9]+(?:\.[0-9]+)?)/)?.[1]||NaN);
+                  if(Number.isFinite(n) && n>0){ patch.amount = n; }
+                }else if(kind==='date'){
+                  let d = null;
+                  if(/今天/.test(text)) d = new Date();
+                  else if(/昨天|昨日/.test(text)){ d = new Date(); d.setDate(d.getDate()-1); }
+                  else if(/前天/.test(text)){ d = new Date(); d.setDate(d.getDate()-2); }
+                  else if(/明天/.test(text)){ d = new Date(); d.setDate(d.getDate()+1); }
+                  const iso = text.match(/(20\d{2})[-\/]?(\d{1,2})[-\/]?(\d{1,2})/);
+                  if(iso){ const y=Number(iso[1]); const m=String(Number(iso[2])).padStart(2,'0'); const dd=String(Number(iso[3])).padStart(2,'0'); patch.date=`${y}-${m}-${dd}`; }
+                  else if(d){ patch.date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+                }else if(kind==='note'){
+                  patch.note = text.slice(0,200);
+                }
+                if(Object.keys(patch).length>0){
+                  try{
+                    if(isDbEnabled()) await pgdb.updateTransaction(userId, st.txId, patch);
+                    else fileStore.updateTransaction(uid, st.txId, patch);
+                  }catch(_){ }
+                  editState.delete(uid);
+                  const bubble = glassFlexBubble({ baseUrl: getBaseUrl(req)||'', title:'已更新', subtitle:'變更已套用', lines:[], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'已更新', contents:bubble }]);
+                  continue;
+                }else{
+                  const bubble = buildEditPromptBubble(getBaseUrl(req)||'', kind, st.txId);
+                  await lineReply(replyToken, [{ type:'flex', altText:'請重新輸入', contents:bubble }]);
+                  continue;
+                }
+              }
             }
             // If user is in guided flow, handle by step
             {
