@@ -330,9 +330,15 @@ function getUserFromRequest(req){
   try{
     const cookies = parseCookies(req);
     const raw = cookies['session']||'';
-    const sid = verifySigned(raw);
-    if(sid){
-      const s = sessions.get(sid);
+    const signed = verifySigned(raw);
+    if(signed){
+      // New stateless cookie: value is 'uid:<userId>'
+      if(String(signed).startsWith('uid:')){
+        const id = String(signed).slice(4);
+        if(id) return { id };
+      }
+      // Legacy: treat as sid and read from in-memory map
+      const s = sessions.get(signed);
       if(s && s.user) return s.user;
     }
     // 匿名模式：若允許未登入，改用簽名的 uid cookie 作為使用者 ID
@@ -996,11 +1002,9 @@ const server = http.createServer(async (req, res) => {
         name: profile?.displayName || 'LINE User',
         picture: profile?.pictureUrl || ''
       };
-      const sid = crypto.randomBytes(16).toString('hex');
-      sessions.set(sid, { user, createdAt: Date.now() });
-      // 在本機開發（http）時不要加 Secure，否則瀏覽器不會儲存 cookie
+      // Stateless cookie: store signed uid directly
       const isHttps = /^https:\/\//.test(getBaseUrl(req)||'');
-      setCookie(res, 'session', createSigned(sid), { maxAge: 60*60*24*7, secure: isHttps });
+      setCookie(res, 'session', createSigned(`uid:${user.id}`), { maxAge: 60*60*24*7, secure: isHttps });
       // Consume link code (if present in state) to bind LINE bot user to this web account
       try{
         const parts = parsed.split('|');
@@ -1047,10 +1051,11 @@ const server = http.createServer(async (req, res) => {
     }
     // logout
     if (req.method === 'POST' && reqPath === '/auth/logout'){
+      // Stateless: clear cookie only; legacy map deletion is best-effort
       const cookies = parseCookies(req);
       const raw = cookies['session']||'';
-      const sid = verifySigned(raw);
-      if(sid){ sessions.delete(sid); }
+      const signed = verifySigned(raw);
+      if(signed && !String(signed).startsWith('uid:')){ sessions.delete(signed); }
       clearCookie(res, 'session');
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true }));
