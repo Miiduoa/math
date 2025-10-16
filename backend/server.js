@@ -217,9 +217,16 @@ function getUserFromRequest(req){
     const cookies = parseCookies(req);
     const raw = cookies['session']||'';
     const sid = verifySigned(raw);
-    if(!sid) return null;
-    const s = sessions.get(sid);
-    return s && s.user ? s.user : null;
+    if(sid){
+      const s = sessions.get(sid);
+      if(s && s.user) return s.user;
+    }
+    // 匿名模式：若允許未登入，改用簽名的 uid cookie 作為使用者 ID
+    if(!REQUIRE_AUTH){
+      const anon = verifySigned(cookies['uid']||'');
+      if(anon){ return { id: anon }; }
+    }
+    return null;
   }catch(_){ return null; }
 }
 
@@ -242,6 +249,19 @@ function getBaseUrl(req){
     if(host){ return `${proto}://${host}`; }
   }catch(_){ }
   return '';
+}
+
+// 在允許匿名的情況下，確保每位未登入使用者有固定的簽名 uid cookie（持久化到瀏覽器），避免資料混用
+function ensureAnonCookie(req, res){
+  if(REQUIRE_AUTH) return;
+  try{
+    const cookies = parseCookies(req);
+    const existing = verifySigned(cookies['uid']||'');
+    if(existing) return; // 已存在有效 uid
+    const anonId = 'anon:' + crypto.randomBytes(12).toString('hex');
+    const isHttps = /^https:\/\//.test(getBaseUrl(req)||'');
+    setCookie(res, 'uid', createSigned(anonId), { maxAge: 60*60*24*365, secure: isHttps });
+  }catch(_){ /* ignore */ }
 }
 
 function parseBody(req) {
@@ -298,16 +318,16 @@ async function lineReply(replyToken, messages){
 }
 
 // Build a glass-style Flex bubble approximating iOS frosted glass aesthetics
-function glassFlexBubble({ baseUrl='', title='', subtitle='', lines=[], buttons=[] }){
+function glassFlexBubble({ baseUrl='', title='', subtitle='', lines=[], buttons=[], showHero=false, compact=true }){
   const isHttps = /^https:\/\//.test(baseUrl||'');
-  const heroUrl = isHttps ? `${baseUrl}/flex-glass.svg` : '';
+  const heroUrl = (showHero && isHttps) ? `${baseUrl}/flex-glass.svg` : '';
   const bodyContents = [];
-  if(title){ bodyContents.push({ type:'text', text:String(title), weight:'bold', size:'xl', color:'#0f172a' }); }
-  if(subtitle){ bodyContents.push({ type:'text', text:String(subtitle), size:'sm', color:'#475569', wrap:true, margin:'sm' }); }
+  if(title){ bodyContents.push({ type:'text', text:String(title), weight:'bold', size: compact?'lg':'xl', color:'#0f172a' }); }
+  if(subtitle){ bodyContents.push({ type:'text', text:String(subtitle), size: compact?'xs':'sm', color:'#475569', wrap:true, margin: compact?'xs':'sm' }); }
   if(Array.isArray(lines) && lines.length>0){
     bodyContents.push({
-      type:'box', layout:'vertical', spacing:'sm', paddingAll:'12px', backgroundColor:'#ffffffcc', cornerRadius:'12px', contents:
-        lines.map(t=>({ type:'text', text:String(t), size:'sm', color:'#0f172a', wrap:true }))
+      type:'box', layout:'vertical', spacing: compact?'xs':'sm', paddingAll: compact?'8px':'12px', backgroundColor:'#ffffffcc', cornerRadius:'12px', contents:
+        lines.map(t=>({ type:'text', text:String(t), size: compact?'xs':'sm', color:'#0f172a', wrap:true }))
     });
   }
   const footerContents = (buttons||[]).map(btn=>({
@@ -319,9 +339,103 @@ function glassFlexBubble({ baseUrl='', title='', subtitle='', lines=[], buttons=
   return {
     type:'bubble',
     hero: heroUrl ? { type:'image', url: heroUrl, size:'full', aspectRatio:'20:10', aspectMode:'cover' } : undefined,
-    body:{ type:'box', layout:'vertical', spacing:'sm', contents: bodyContents },
-    footer: footerContents.length>0 ? { type:'box', layout:'vertical', spacing:'md', contents: footerContents, flex:0 } : undefined
+    body:{ type:'box', layout:'vertical', spacing: compact?'xs':'sm', contents: bodyContents, paddingAll: compact?'12px':'16px' },
+    footer: footerContents.length>0 ? { type:'box', layout:'vertical', spacing: compact?'sm':'md', contents: footerContents, flex:0, paddingAll: compact?'12px':'16px' } : undefined
   };
+}
+
+// Build main menu Flex bubble for LINE bot
+function menuFlexBubble({ baseUrl='' }){
+  const rows = [
+    [
+      { label:'記一筆', data:'flow=add&step=start', style:'primary' },
+      { label:'最近交易', text:'最近交易', style:'secondary' }
+    ],
+    [
+      { label:'未請款', text:'未請款', style:'secondary' },
+      { label:'分類支出', text:'分類支出', style:'secondary' }
+    ],
+    [
+      { label:'統計摘要', text:'查帳', style:'secondary' },
+      { label:'開啟網頁版', uri: baseUrl||'https://example.com', style:'link' }
+    ]
+  ];
+  const contents = [];
+  contents.push({ type:'text', text:'功能選單', weight:'bold', size:'lg', color:'#0f172a' });
+  contents.push({ type:'text', text:'在這裡可以快速記帳或查看資訊', size:'xs', color:'#475569', wrap:true, margin:'xs' });
+  for(const row of rows){
+    contents.push({
+      type:'box', layout:'horizontal', spacing:'md', contents: row.map(btn=>{
+        if(btn.data){
+          return { type:'button', style: btn.style==='link'?'link':'primary', color: btn.style==='secondary'?'#64748b':undefined, action:{ type:'postback', label:btn.label, data:btn.data } };
+        }
+        if(btn.text){
+          return { type:'button', style: btn.style==='link'?'link':'secondary', color: btn.style==='secondary'?'#64748b':undefined, action:{ type:'message', label:btn.label, text:btn.text } };
+        }
+        if(btn.uri){
+          return { type:'button', style:'link', action:{ type:'uri', label:btn.label, uri: btn.uri } };
+        }
+        return { type:'spacer' };
+      })
+    });
+  }
+  return {
+    type:'bubble',
+    body:{ type:'box', layout:'vertical', spacing:'xs', contents, paddingAll:'12px' }
+  };
+}
+
+// Simple in-memory guided add flow state
+const guidedFlow = new Map(); // userId -> { step, payload }
+
+function parsePostbackData(s){
+  const params = new URLSearchParams(String(s||''));
+  const out = {};
+  for(const [k,v] of params.entries()){ out[k]=v; }
+  return out;
+}
+
+function buildAmountPrompt(base){
+  const amounts = [50,100,150,200,300,500];
+  return glassFlexBubble({
+    baseUrl: base,
+    title:'輸入金額',
+    subtitle:'請輸入金額，或點選快速金額',
+    lines:[ '範例：120、85.5' ],
+    buttons: amounts.map(v=>({ style:'secondary', color:'#64748b', action:{ type:'postback', label:`$${v}`, data:`flow=add&step=amount&value=${v}` } })).concat([
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } }
+    ]),
+    showHero:false,
+    compact:true
+  });
+}
+
+async function buildCategoryPrompt(base, isDb, userIdOrUid){
+  let cats=[];
+  try{ cats = isDb ? (await pgdb.getCategories()) : fileStore.getCategories(userIdOrUid||'anonymous'); }catch(_){ cats=[]; }
+  const top = cats.slice(0,10);
+  const buttons = top.map(c=> ({ style:'secondary', color:'#64748b', action:{ type:'postback', label:c.name, data:`flow=add&step=cat&id=${encodeURIComponent(c.id)}` } }));
+  return glassFlexBubble({
+    baseUrl: base,
+    title:'選擇分類',
+    subtitle:'請選擇分類',
+    lines:[],
+    buttons: buttons.concat([{ style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } }]),
+    showHero:false,
+    compact:true
+  });
+}
+
+function buildNotePrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title:'備註（可略過）',
+    subtitle:'請直接輸入備註文字，或點選略過',
+    lines:[ '若不需要可點「略過」' ],
+    buttons:[ { style:'secondary', color:'#64748b', action:{ type:'postback', label:'略過', data:'flow=add&step=note&skip=1' } }, { style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } } ],
+    showHero:false,
+    compact:true
+  });
 }
 
 function parseNlpQuick(text){
@@ -413,6 +527,9 @@ const server = http.createServer(async (req, res) => {
     const reqPath = url.pathname;
     const normPath = String(reqPath || '').replace(/\/+$/,'').toLowerCase();
     try{ console.log('[req]', req.method, reqPath); }catch(_){ }
+
+    // 若允許匿名，為未登入使用者建立持久化 uid cookie
+    ensureAnonCookie(req, res);
 
     // LINE Login start
     if (req.method === 'GET' && reqPath === '/auth/line/start'){
@@ -506,6 +623,12 @@ const server = http.createServer(async (req, res) => {
           const legacyRaw = (profile?.userId)||'';
           if(legacyRaw){ try{ fileStore.migrateUserData(legacyRaw, user.id); }catch(_){ } }
           try{ fileStore.migrateUserData('anonymous', user.id); }catch(_){ }
+          // 若先前以匿名 uid 使用，將匿名資料搬移到登入帳號
+          try{
+            const cookies = parseCookies(req);
+            const anon = verifySigned(cookies['uid']||'');
+            if(anon){ fileStore.migrateUserData(anon, user.id); }
+          }catch(_){ }
         }
       }catch(_){ }
       res.writeHead(302, { Location: '/' });
@@ -885,6 +1008,119 @@ const server = http.createServer(async (req, res) => {
             }
             continue;
           }
+          // Postback events (for guided flow and menu)
+          if(ev.type==='postback'){
+            const replyToken = ev.replyToken;
+            const lineUidRaw = ev.source?.userId || '';
+            let userId = lineUidRaw ? `line:${lineUidRaw}` : null;
+            try{
+              if(lineUidRaw){
+                if(isDbEnabled()){
+                  const mapped = await pgdb.getLinkedWebUser(`line:${lineUidRaw}`);
+                  if(mapped) userId = mapped;
+                } else {
+                  const mapped = linkStore.getLinkedWebUser(`line:${lineUidRaw}`);
+                  if(mapped) userId = mapped;
+                }
+              }
+            }catch(_){ }
+            const dataObj = parsePostbackData(ev.postback?.data||'');
+            const flow = dataObj.flow;
+            const base = getBaseUrl(req)||'';
+            if(flow==='add'){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              let state = guidedFlow.get(uid) || { step:'amount', payload:{ type:'expense', currency:'TWD', rate:1 } };
+              if(dataObj.step==='start'){
+                state = { step:'amount', payload:{ type:'expense', currency:'TWD', rate:1 } };
+                guidedFlow.set(uid, state);
+                const bubble = buildAmountPrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'輸入金額', contents:bubble }]);
+                continue;
+              }
+              if(dataObj.step==='cancel'){
+                guidedFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已取消', subtitle:'已中止記帳流程', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已取消', contents:bubble }]);
+                continue;
+              }
+              if(dataObj.step==='amount' && dataObj.value){
+                const amt = Number(dataObj.value);
+                if(Number.isFinite(amt) && amt>0){ state.payload.amount = amt; state.step='category'; guidedFlow.set(uid, state); }
+                const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
+                await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                continue;
+              }
+              if(dataObj.step==='cat' && dataObj.id){
+                state.payload.categoryId = String(dataObj.id);
+                state.step = 'note';
+                guidedFlow.set(uid, state);
+                const bubble = buildNotePrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'填寫備註', contents:bubble }]);
+                continue;
+              }
+              if(dataObj.step==='note' && dataObj.skip==='1'){
+                // finalize
+                const payload = { date: todayYmd(), ...state.payload, note:'' };
+                if(isDbEnabled()){
+                  await pgdb.addTransaction(userId, payload);
+                }else{
+                  try{ fileStore.addTransaction(uid, payload); }catch(_){ }
+                }
+                guidedFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines:[ `金額：${payload.currency} ${Number(payload.amount||0).toFixed(2)}` ], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
+                continue;
+              }
+            }
+            // Menu postback fallthrough
+            if(dataObj && dataObj.flow==='menu'){
+              const bubble = menuFlexBubble({ baseUrl: getBaseUrl(req)||'' });
+              await lineReply(replyToken, [{ type:'flex', altText:'功能選單', contents:bubble }]);
+              continue;
+            }
+            // Transaction actions (delete)
+            if(flow==='tx'){
+              const action = dataObj.action;
+              const id = dataObj.id||'';
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              if(action==='delete'){
+                const step = dataObj.step||'confirm';
+                if(step==='confirm'){
+                  const bubble = glassFlexBubble({
+                    baseUrl: base,
+                    title:'刪除確認',
+                    subtitle:'確定要刪除此筆交易嗎？此動作無法復原',
+                    lines:[],
+                    buttons:[
+                      { style:'primary', color:'#dc2626', action:{ type:'postback', label:'確認刪除', data:`flow=tx&action=delete&id=${encodeURIComponent(id)}&step=do` } },
+                      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'取消', data:'flow=tx&action=cancel' } }
+                    ],
+                    showHero:false,
+                    compact:true
+                  });
+                  await lineReply(replyToken, [{ type:'flex', altText:'刪除確認', contents:bubble }]);
+                  continue;
+                }
+                if(step==='do'){
+                  try{
+                    if(isDbEnabled()){
+                      await pgdb.deleteTransaction(userId, id);
+                    }else{
+                      fileStore.deleteTransaction(uid, id);
+                    }
+                  }catch(_){ /* ignore */ }
+                  const bubble = glassFlexBubble({ baseUrl:base, title:'已刪除', subtitle:'這筆交易已刪除', lines:[], buttons:[ { style:'secondary', action:{ type:'message', label:'查看最近交易', text:'最近交易' } } ], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'刪除完成', contents:bubble }]);
+                  continue;
+                }
+              }
+              if(action==='cancel'){
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已取消', subtitle:'已取消動作', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已取消', contents:bubble }]);
+                continue;
+              }
+            }
+          }
           if(ev.type==='message' && ev.message?.type==='text'){
             const replyToken = ev.replyToken;
             const lineUidRaw = ev.source?.userId || '';
@@ -903,6 +1139,39 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            // If user is in guided flow, handle by step
+            {
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const state = guidedFlow.get(uid);
+              if(state){
+                const base = getBaseUrl(req)||'';
+                if(state.step==='amount'){
+                  const n = Number(text.match(/([0-9]+(?:\.[0-9]+)?)/)?.[1]||NaN);
+                  if(Number.isFinite(n) && n>0){
+                    state.payload.amount = n; state.step='category'; guidedFlow.set(uid, state);
+                    const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
+                    await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                    continue;
+                  }
+                  const bubble = buildAmountPrompt(base);
+                  await lineReply(replyToken, [{ type:'flex', altText:'輸入金額', contents:bubble }]);
+                  continue;
+                }
+                if(state.step==='note'){
+                  const note = (text==='-'?'':text);
+                  const payload = { date: todayYmd(), ...state.payload, note };
+                  if(isDbEnabled()){
+                    await pgdb.addTransaction(userId, payload);
+                  }else{
+                    try{ fileStore.addTransaction(uid, payload); }catch(_){ }
+                  }
+                  guidedFlow.delete(uid);
+                  const bubble = glassFlexBubble({ baseUrl:base, title: payload.type==='income'?'已記收入':'已記支出', subtitle: payload.date, lines:[ `金額：${payload.currency} ${Number(payload.amount||0).toFixed(2)}`, note?`備註：${note}`:undefined ].filter(Boolean), showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
+                  continue;
+                }
+              }
+            }
             if(normalized==='綁定' || normalized==='绑定'){
               if(!isDbEnabled() && lineUidRaw){
                 const base = getBaseUrl(req) || '';
@@ -935,6 +1204,21 @@ const server = http.createServer(async (req, res) => {
                 await lineReply(replyToken, [{ type:'flex', altText:'需要系統設定', contents:bubble }]);
                 continue;
               }
+            }
+            // Main menu
+            if(/^(選單|功能|menu)$/i.test(text)){
+              const bubble = menuFlexBubble({ baseUrl: getBaseUrl(req)||'' });
+              await lineReply(replyToken, [{ type:'flex', altText:'功能選單', contents:bubble }]);
+              continue;
+            }
+            // Quick start guided add
+            if(/^(記一筆|快速記帳|新增)$/.test(text)){
+              const base = getBaseUrl(req)||'';
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              guidedFlow.set(uid, { step:'amount', payload:{ type:'expense', currency:'TWD', rate:1 } });
+              const bubble = buildAmountPrompt(base);
+              await lineReply(replyToken, [{ type:'flex', altText:'輸入金額', contents:bubble }]);
+              continue;
             }
             // Quick intent: stats → 回覆玻璃風格 Flex
             const stats = await handleStatsQuery(userId, text);
@@ -970,7 +1254,14 @@ const server = http.createServer(async (req, res) => {
                     (Number(t.claimAmount||0)>0) ? `請款：${t.currency||'TWD'} ${Number(t.claimAmount||0).toFixed(2)}` : undefined,
                     t.claimed ? '狀態：已請款' : (t.type==='expense' ? '狀態：未請款' : undefined),
                     t.note ? `備註：${t.note}` : undefined
-                  ].filter(Boolean)
+                  ].filter(Boolean),
+                  buttons:[
+                    { style:'secondary', color:'#64748b', action:{ type:'postback', label:'刪除', data:`flow=tx&action=delete&id=${encodeURIComponent(t.id)}` } },
+                    { style:'link', action:{ type:'uri', label:'編輯', uri: (getBaseUrl(req)||'').replace(/\/$/,'/') }
+                    }
+                  ],
+                  showHero:false,
+                  compact:true
                 }));
                 const contents = bubbles.length>1 ? { type:'carousel', contents:bubbles } : bubbles[0]||glassFlexBubble({ baseUrl:getBaseUrl(req), title:'最近交易', subtitle:'沒有資料', lines:['目前沒有交易'] });
                 await lineReply(replyToken, [{ type:'flex', altText:'最近交易', contents }]);
@@ -989,7 +1280,14 @@ const server = http.createServer(async (req, res) => {
                   (Number(t.claimAmount||0)>0) ? `請款：${t.currency||'TWD'} ${Number(t.claimAmount||0).toFixed(2)}` : undefined,
                   t.claimed ? '狀態：已請款' : (t.type==='expense' ? '狀態：未請款' : undefined),
                   t.note ? `備註：${t.note}` : undefined
-                ].filter(Boolean)
+                  ].filter(Boolean),
+                  buttons:[
+                    { style:'secondary', color:'#64748b', action:{ type:'postback', label:'刪除', data:`flow=tx&action=delete&id=${encodeURIComponent(t.id)}` } },
+                    { style:'link', action:{ type:'uri', label:'編輯', uri: (getBaseUrl(req)||'').replace(/\/$/,'/') }
+                    }
+                  ],
+                  showHero:false,
+                  compact:true
               }));
               const contents = bubbles.length>1 ? { type:'carousel', contents:bubbles } : bubbles[0]||glassFlexBubble({ baseUrl:getBaseUrl(req), title:'最近交易', subtitle:'沒有資料', lines:['目前沒有交易'] });
               await lineReply(replyToken, [{ type:'flex', altText:'最近交易', contents }]);
@@ -1104,7 +1402,8 @@ const server = http.createServer(async (req, res) => {
               const lines = [
                 '記帳：支出 120 餐飲 早餐 2025-10-12',
                 '查詢：這月支出多少？',
-                '清單：最近交易、未請款、分類支出'
+                '清單：最近交易、未請款、分類支出',
+                '功能：輸入「選單」開啟功能選單'
               ];
               const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'可用指令', subtitle:'也支援自然語言', lines });
               await lineReply(replyToken, [{ type:'flex', altText:'使用說明', contents:bubble }]);
