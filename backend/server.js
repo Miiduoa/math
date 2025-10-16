@@ -172,6 +172,18 @@ const linkStore = {
 // Simple in-memory session store (for single-instance). For production multi-instance, use shared store.
 const sessions = new Map(); // sessionId -> { user, createdAt }
 
+// Train local model using note -> category (per user)
+async function trainModelFor(userIdOrUid, note, categoryId){
+  try{
+    if(!note || !categoryId) return;
+    if(isDbEnabled()){
+      await pgdb.updateCategoryModelFromNote(userIdOrUid, note, categoryId);
+    }else{
+      await fileStore.updateCategoryModelFromNote(userIdOrUid||'anonymous', note, categoryId);
+    }
+  }catch(_){ /* ignore training errors */ }
+}
+
 function b64url(input){
   return Buffer.from(input).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
@@ -1412,6 +1424,49 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Model backfill: train from all existing transactions (admin or authenticated user only)
+    if (req.method === 'POST' && reqPath === '/api/model/backfill'){
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      const user = getUserFromRequest(req);
+      try{
+        if(isDbEnabled()){
+          const rows = await pgdb.getTransactions(user?.id);
+          for(const t of rows){ if(t && t.note && t.categoryId){ await pgdb.updateCategoryModelFromNote(user?.id, t.note, t.categoryId); } }
+        }else{
+          const uid = user?.id || 'anonymous';
+          const rows = fileStore.getTransactions(uid);
+          for(const t of rows){ if(t && t.note && t.categoryId){ await fileStore.updateCategoryModelFromNote(uid, t.note, t.categoryId); } }
+        }
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true }));
+      }catch(err){
+        res.writeHead(500, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false }));
+      }
+    }
+
+    // Model inspect: show current model keywords/weights (limited)
+    if (req.method === 'GET' && reqPath === '/api/model/inspect'){
+      if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
+      const user = getUserFromRequest(req);
+      try{
+        if(isDbEnabled()){
+          const rows = await pgdb._getAllModel(user?.id);
+          res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ ok:true, model: rows.slice(0,500) }));
+        }else{
+          const uid = user?.id || 'anonymous';
+          const rows = (function(){ try{ return require('fs').existsSync ? [] : []; }catch(_){ return []; } })();
+          // fallback: we do not persist a separate model file listing here; expose none for fileStore
+          res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ ok:true, model: [] }));
+        }
+      }catch(err){
+        res.writeHead(500, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false }));
+      }
+    }
+
     if (req.method === 'GET' && reqPath === '/api/sync/export') {
       if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const user = getUserFromRequest(req);
@@ -2080,6 +2135,8 @@ const server = http.createServer(async (req, res) => {
                 const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
                 try{ fileStore.addTransaction(uid, payload); }catch(_){ }
               }
+              // train local model with note → category
+              try{ if(payload.note && payload.categoryId){ await trainModelFor(userId||'anonymous', payload.note, payload.categoryId); } }catch(_){ }
               const bubble = glassFlexBubble({
                 baseUrl: getBaseUrl(req),
                 title: payload.type==='income' ? '已記收入' : '已記支出',
