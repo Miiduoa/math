@@ -438,6 +438,43 @@ function buildNotePrompt(base){
   });
 }
 
+function buildClaimAskPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '是否新增請款金額？',
+    subtitle: '若需要報帳，請選「是」並輸入請款金額',
+    lines: [],
+    buttons: [
+      { style:'primary', action:{ type:'postback', label:'是，新增請款金額', data:'flow=add&step=claim_ask&ans=yes' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'否，略過', data:'flow=add&step=claim_ask&ans=no' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } }
+    ],
+    showHero:false,
+    compact:true
+  });
+}
+
+function buildClaimAmountPrompt(base, total){
+  const amt = Number(total)||0;
+  const candidatesRaw = Array.from(new Set([
+    Math.max(1, Math.round(amt)),
+    Math.max(1, Math.round(amt*0.8)),
+    Math.max(1, Math.round(amt*0.5))
+  ])).slice(0,3);
+  const buttons = candidatesRaw.map(v=>({ style:'secondary', color:'#64748b', action:{ type:'postback', label:`$${v}`, data:`flow=add&step=claim_amount&value=${v}` } }));
+  buttons.push({ style:'secondary', color:'#64748b', action:{ type:'postback', label:'略過', data:'flow=add&step=claim_ask&ans=no' } });
+  buttons.push({ style:'link', action:{ type:'postback', label:'取消', data:'flow=add&step=cancel' } });
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '輸入請款金額',
+    subtitle: '請輸入數字，或點選快速金額',
+    lines: [ amt>0 ? `本次金額：$${amt.toFixed(2)}` : '' ].filter(Boolean),
+    buttons,
+    showHero:false,
+    compact:true
+  });
+}
+
 function parseNlpQuick(text){
   const t = String(text||'').trim();
   const result = { };
@@ -1045,7 +1082,28 @@ const server = http.createServer(async (req, res) => {
               }
               if(dataObj.step==='amount' && dataObj.value){
                 const amt = Number(dataObj.value);
-                if(Number.isFinite(amt) && amt>0){ state.payload.amount = amt; state.step='category'; guidedFlow.set(uid, state); }
+                if(Number.isFinite(amt) && amt>0){ state.payload.amount = amt; state.step='claim_ask'; guidedFlow.set(uid, state); }
+                const bubble = buildClaimAskPrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                continue;
+              }
+              if(dataObj.step==='claim_ask'){
+                const ans = String(dataObj.ans||'no');
+                if(ans==='yes'){
+                  state.step = 'claim_amount'; guidedFlow.set(uid, state);
+                  const bubble = buildClaimAmountPrompt(base, state.payload.amount||0);
+                  await lineReply(replyToken, [{ type:'flex', altText:'輸入請款金額', contents:bubble }]);
+                  continue;
+                }else{
+                  state.payload.claimAmount = 0; state.payload.claimed = false; state.step='category'; guidedFlow.set(uid, state);
+                  const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
+                  await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                  continue;
+                }
+              }
+              if(dataObj.step==='claim_amount' && dataObj.value){
+                const v = Number(dataObj.value);
+                if(Number.isFinite(v) && v>=0){ state.payload.claimAmount = v; state.payload.claimed = v>0 ? false : undefined; state.step='category'; guidedFlow.set(uid, state); }
                 const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
                 await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
                 continue;
@@ -1148,13 +1206,25 @@ const server = http.createServer(async (req, res) => {
                 if(state.step==='amount'){
                   const n = Number(text.match(/([0-9]+(?:\.[0-9]+)?)/)?.[1]||NaN);
                   if(Number.isFinite(n) && n>0){
-                    state.payload.amount = n; state.step='category'; guidedFlow.set(uid, state);
-                    const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
-                    await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                    state.payload.amount = n; state.step='claim_ask'; guidedFlow.set(uid, state);
+                    const bubble = buildClaimAskPrompt(base);
+                    await lineReply(replyToken, [{ type:'flex', altText:'是否新增請款金額', contents:bubble }]);
                     continue;
                   }
                   const bubble = buildAmountPrompt(base);
                   await lineReply(replyToken, [{ type:'flex', altText:'輸入金額', contents:bubble }]);
+                  continue;
+                }
+                if(state.step==='claim_amount'){
+                  const n = Number(text.match(/([0-9]+(?:\.[0-9]+)?)/)?.[1]||NaN);
+                  if(Number.isFinite(n) && n>=0){
+                    state.payload.claimAmount = n; state.payload.claimed = n>0 ? false : undefined; state.step='category'; guidedFlow.set(uid, state);
+                    const bubble = await buildCategoryPrompt(base, isDbEnabled(), userId||uid);
+                    await lineReply(replyToken, [{ type:'flex', altText:'選擇分類', contents:bubble }]);
+                    continue;
+                  }
+                  const bubble = buildClaimAmountPrompt(base, state.payload.amount||0);
+                  await lineReply(replyToken, [{ type:'flex', altText:'輸入請款金額', contents:bubble }]);
                   continue;
                 }
                 if(state.step==='note'){
