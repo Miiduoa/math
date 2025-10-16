@@ -751,8 +751,9 @@ function parseNlpQuick(text){
   // claim amount
   const claim = normalized.match(/請款\s*([0-9,\.零〇一二兩三四五六七八九十百千萬]+)/);
   if(claim){ const v = parseAmount(claim[1]); if(Number.isFinite(v)) result.claimAmount = v; }
+  // synonyms: 不用請款 / 無需請款 / 不報帳 / 不需報帳 / 免請款
   if(/已請款|完成請款|報帳完成/.test(t)) result.claimed = true;
-  if(/未請款|還沒請款/.test(t)) result.claimed = false;
+  if(/未請款|還沒請款|不用請款|無需請款|不報帳|不需報帳|免請款/.test(t)) result.claimed = false;
   // note
   result.note = t;
   return result;
@@ -766,7 +767,7 @@ async function aiStructParse(text, context){
   const payload = {
     model: OPENAI_MODEL,
     messages: [
-      { role:'system', content:'你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。欄位: type(income|expense; 預設 expense), amount(number), currency(string; 例如 TWD USD), date(YYYY-MM-DD; 支援 今天/昨天/前天/明天 相對日期), categoryName(string), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。金額可含逗號或中文數字（如 一百二十/兩百），幣別同義字（台幣/新台幣/NT/NTD/NT$ 視為 TWD）。無法判斷的欄位請省略。只輸出 JSON。'},
+      { role:'system', content:'你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。欄位: type(income|expense; 預設 expense), amount(number), currency(string; 例如 TWD USD), date(YYYY-MM-DD; 支援 今天/昨天/前天/明天 相對日期), categoryName(string), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。金額可含逗號或中文數字（如 一百二十/兩百），幣別同義字（台幣/新台幣/NT/NTD/NT$ 視為 TWD）。「不用請款/無需請款/不報帳/不需報帳/免請款」→ claimed=false 並 claimAmount=0。「已請款/完成請款/報帳完成」→ claimed=true。無法判斷的欄位請省略。只輸出 JSON。'},
       { role:'user', content: text }
     ],
     temperature: 0.2
@@ -2052,6 +2053,21 @@ const server = http.createServer(async (req, res) => {
                   const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
                   const hit = cats.find(c=> String(c.name).toLowerCase()===String(parsed.categoryName).toLowerCase());
                   if(hit) payload.categoryId = hit.id;
+                }catch(_){ }
+              }
+              // note-driven keyword mapping (e.g., 麵包 → 餐飲)
+              if(!payload.categoryId && parsed.note){
+                const noteLower = String(parsed.note).toLowerCase();
+                try{
+                  const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+                  const keywords = [
+                    { kw:['麵包','早餐','午餐','晚餐','餐','咖啡','飲料'], id: (cats.find(c=>c.id==='food')?.id) || (cats.find(c=> /餐/.test(c.name))?.id) },
+                    { kw:['捷運','公車','計程車','高鐵','火車','車票','加油'], id: (cats.find(c=>c.id==='transport')?.id) || (cats.find(c=> /交/.test(c.name))?.id) },
+                    { kw:['衣服','購買','買了','買一個','買個','網購','蝦皮','momo','蝦皮購物'], id: (cats.find(c=>c.id==='shopping')?.id) || (cats.find(c=> /購/.test(c.name))?.id) }
+                  ];
+                  for(const rule of keywords){
+                    if(rule && rule.id && rule.kw.some(k=> noteLower.includes(k))){ payload.categoryId = rule.id; break; }
+                  }
                 }catch(_){ }
               }
               // fallback to first category if empty
