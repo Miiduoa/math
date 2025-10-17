@@ -283,8 +283,8 @@
     <form method="dialog" class="quick-form" id="aiForm">
       <h3>AI 助理</h3>
       <div class="field field--full">
-        <label for="aiMessage">詢問</label>
-        <input id="aiMessage" type="text" placeholder="想問什麼？例如：如何降低本月餐飲支出？" required>
+        <label for="aiMessage">詢問（支援多行貼上）</label>
+        <textarea id="aiMessage" rows="6" placeholder="可一次貼上多筆，如：\n10/5 咖啡 100\n10/6 全聯 800\n10/6 星巴克 500" required></textarea>
       </div>
       <div class="inline" style="gap:12px; margin:6px 0 0">
         <label class="inline" style="gap:6px"><input id="aiAutoAddToggle" type="checkbox"><small>自動記帳</small></label>
