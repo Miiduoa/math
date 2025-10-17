@@ -870,7 +870,17 @@
           return null;
         }catch(_){ return null; }
       }
-      async function buildPayloadFromParsed(parsed, fallbackNote){
+      function guessCategoryFromText(text){
+        try{
+          const s = String(text||'').trim();
+          if(!s) return '';
+          const cleaned = s.replace(/\s+/g,'');
+          const m = cleaned.match(/^[^0-9$￥¥.,，。；;]+/);
+          const word = (m && m[0]) ? m[0].slice(0, 12) : '';
+          return word;
+        }catch(_){ return ''; }
+      }
+      async function buildPayloadFromParsed(parsed, fallbackNote, prevDate){
         const p = parsed||{};
         let catId = p.categoryId || '';
         // 0) 如果 AI 結構化提供了 categoryName，優先映射到現有分類 id
@@ -899,8 +909,15 @@
             }
           }catch(_){ }
         }
+        // 3) 仍無分類：從文字猜測並建立新分類
+        if(!catId){
+          const guess = guessCategoryFromText(p.note||fallbackNote||'');
+          if(guess){
+            try{ const created = await DB.addCategory(guess); if(created && created.id){ catId = created.id; } }catch(_){ }
+          }
+        }
         const payload = {
-          date: p.date || today(),
+          date: p.date || prevDate || today(),
           type: p.type || 'expense',
           categoryId: catId || ($('#txCategory')?.value || ''),
           currency: p.currency || 'TWD',
@@ -917,6 +934,7 @@
         if(lines.length<=1) return false;
         aiAnswer.textContent = '批次處理中…';
         let success=0, skipped=0;
+        let lastDate = '';
         for(const line of lines){
           // 1) AI struct
           let parsed = await structParseOne(base, ctx, line);
@@ -924,10 +942,11 @@
           if(!parsed){ parsed = parseNlp(line); }
           // 3) must have amount
           if(!Number.isFinite(Number(parsed?.amount))){ skipped++; continue; }
-          const payload = await buildPayloadFromParsed(parsed, line);
+          const payload = await buildPayloadFromParsed(parsed, line, lastDate);
           if(!payload.categoryId || !payload.type || !Number.isFinite(payload.amount) || payload.amount<=0){ skipped++; continue; }
           try{ await DB.addTransaction(payload); success++; }
           catch(_){ skipped++; }
+          if(payload.date){ lastDate = payload.date; }
         }
         aiAnswer.textContent = `已新增 ${success} 筆，略過 ${skipped} 筆。`;
         if(success>0){ refresh(); setTimeout(()=>{ try{ aiDialog.close(); }catch(_){ } }, 600); }
@@ -990,6 +1009,13 @@
               if(hit) catId = hit.id;
             }
           }catch(_){ /* ignore */ }
+        }
+        // 3) still none: create category from guess
+        if(!catId){
+          const guess = guessCategoryFromText(parsed.note||t||'');
+          if(guess){
+            try{ const created = await DB.addCategory(guess); if(created && created.id){ catId = created.id; } }catch(_){ }
+          }
         }
         const payload = {
           date: parsed.date || today(),
