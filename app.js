@@ -858,6 +858,76 @@
         transactions: await DB.getTransactions(),
         categories: await DB.getCategories()
       };
+      async function structParseOne(base, ctx, line){
+        try{
+          const resp = await fetch(`${base.replace(/\/$/,'')}/api/ai`,{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ messages:[{ role:'user', content:line }], context: ctx, mode:'struct' }),
+            signal: aiAbort.signal
+          });
+          const data = await resp.json().catch(()=>({ ok:false }));
+          if(resp.ok && data?.parsed){ return data.parsed; }
+          return null;
+        }catch(_){ return null; }
+      }
+      async function buildPayloadFromParsed(parsed, fallbackNote){
+        const p = parsed||{};
+        let catId = p.categoryId || '';
+        // 0) 如果 AI 結構化提供了 categoryName，優先映射到現有分類 id
+        if(!catId && p.categoryName){
+          try{
+            const cats = await DB.getCategories();
+            const hit = cats.find(c=> String(c.name).toLowerCase()===String(p.categoryName).toLowerCase());
+            if(hit) catId = hit.id;
+          }catch(_){ /* ignore */ }
+        }
+        if(!catId){
+          try{
+            // 1) model-based suggestion
+            catId = await DB.suggestCategoryFromNote?.(p.note||fallbackNote||'') || '';
+            // 2) fuzzy match category name contained in note/text
+            if(!catId){
+              const cats = await DB.getCategories();
+              const noteLower = String(p.note||fallbackNote||'').toLowerCase();
+              const hit = cats.find(c=> noteLower.includes(String(c.name||'').toLowerCase()));
+              if(hit) catId = hit.id;
+            }
+          }catch(_){ }
+        }
+        const payload = {
+          date: p.date || today(),
+          type: p.type || 'expense',
+          categoryId: catId || ($('#txCategory')?.value || ''),
+          currency: p.currency || 'TWD',
+          rate: Number(p.rate)||1,
+          amount: Number(p.amount)||0,
+          claimAmount: Number(p.claimAmount)||0,
+          claimed: p.claimed===true,
+          note: (p.note||fallbackNote||'').trim()
+        };
+        return payload;
+      }
+      async function batchAdd(base, ctx, raw){
+        const lines = String(raw).split(/\r?\n|[;；]/).map(s=>s.trim()).filter(Boolean);
+        if(lines.length<=1) return false;
+        aiAnswer.textContent = '批次處理中…';
+        let success=0, skipped=0;
+        for(const line of lines){
+          // 1) AI struct
+          let parsed = await structParseOne(base, ctx, line);
+          // 2) local parse fallback
+          if(!parsed){ parsed = parseNlp(line); }
+          // 3) must have amount
+          if(!Number.isFinite(Number(parsed?.amount))){ skipped++; continue; }
+          const payload = await buildPayloadFromParsed(parsed, line);
+          if(!payload.categoryId || !payload.type || !Number.isFinite(payload.amount) || payload.amount<=0){ skipped++; continue; }
+          try{ await DB.addTransaction(payload); success++; }
+          catch(_){ skipped++; }
+        }
+        aiAnswer.textContent = `已新增 ${success} 筆，略過 ${skipped} 筆。`;
+        if(success>0){ refresh(); setTimeout(()=>{ try{ aiDialog.close(); }catch(_){ } }, 600); }
+        return true;
+      }
       async function streamChat(base, contextObj, userText){
         try{
           aiAnswer.innerHTML = '<span class="ai-typing"><i></i><i></i><i></i></span>';
@@ -941,6 +1011,12 @@
         // Prefer same-origin if available; fall back to candidate (user-configured)
         const base = (originOk || candidate).replace(/\/$/,'');
         aiAbort = new AbortController();
+        // Multi-line batch mode
+        const isBatch = /\r?\n/.test(text) || /[;；]/.test(text);
+        if(isBatch){
+          const done = await batchAdd(base, context, text);
+          if(done) return;
+        }
         // 先請 AI 進行結構化解析
         const resp = await fetch(`${base.replace(/\/$/,'')}/api/ai`,{
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -1050,6 +1126,15 @@
     const date = t.match(/(20\d{2})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if(date){ const y=Number(date[1]); const m=String(Number(date[2])).padStart(2,'0'); const d=String(Number(date[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
     if(!result.date){
+      // 支援 MM/DD（無年份）→ 以今年為準
+      const md = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
+      if(md){
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = String(Number(md[1])).padStart(2,'0');
+        const d = String(Number(md[2])).padStart(2,'0');
+        result.date = `${y}-${m}-${d}`;
+      }
       const now = new Date();
       const fmt = (d)=> `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
       if(/今天/.test(t)) result.date = fmt(new Date());
