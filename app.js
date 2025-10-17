@@ -824,6 +824,7 @@
     const aiMessage = $('#aiMessage');
     const aiAnswer = $('#aiAnswer');
     const aiAutoAddToggle = $('#aiAutoAddToggle');
+    const aiForceAiToggle = $('#aiForceAiToggle');
     const aiPreview = $('#aiPreview');
     let aiAbort = null; // AbortController for in-flight AI requests
     openAIDialogBtn?.addEventListener('click', ()=>{
@@ -941,7 +942,7 @@
         let lastDate = '';
         for(const line of lines){
           // 1) AI struct
-          let parsed = await structParseOne(base, ctx, line);
+          let parsed = aiForceAiToggle?.checked ? await structParseOne(base, ctx, line) : null;
           // 2) local parse fallback
           const localParsed = parseNlp(line);
           if(!parsed){ parsed = localParsed; }
