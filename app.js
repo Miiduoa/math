@@ -880,8 +880,9 @@
           return word;
         }catch(_){ return ''; }
       }
-      async function buildPayloadFromParsed(parsed, fallbackNote, prevDate){
+      async function buildPayloadFromParsed(parsed, localFallback, fallbackNote, prevDate){
         const p = parsed||{};
+        const lf = localFallback||{};
         let catId = p.categoryId || '';
         // 0) 如果 AI 結構化提供了 categoryName，優先映射到現有分類 id
         if(!catId && p.categoryName){
@@ -916,16 +917,19 @@
             try{ const created = await DB.addCategory(guess); if(created && created.id){ catId = created.id; } }catch(_){ }
           }
         }
+        // amount/date 以本地解析為優先（避免 AI 誤判），AI 補足缺漏
+        const finalAmount = Number.isFinite(Number(lf.amount)) ? Number(lf.amount) : Number(p.amount)||0;
+        const finalDate = lf.date || p.date || prevDate || today();
         const payload = {
-          date: p.date || prevDate || today(),
-          type: p.type || 'expense',
+          date: finalDate,
+          type: p.type || lf.type || 'expense',
           categoryId: catId || ($('#txCategory')?.value || ''),
           currency: p.currency || 'TWD',
           rate: Number(p.rate)||1,
-          amount: Number(p.amount)||0,
-          claimAmount: Number(p.claimAmount)||0,
+          amount: finalAmount||0,
+          claimAmount: Number.isFinite(Number(lf.claimAmount)) ? Number(lf.claimAmount) : Number(p.claimAmount)||0,
           claimed: p.claimed===true,
-          note: (p.note||fallbackNote||'').trim()
+          note: (p.note||lf.note||fallbackNote||'').trim()
         };
         return payload;
       }
@@ -939,10 +943,12 @@
           // 1) AI struct
           let parsed = await structParseOne(base, ctx, line);
           // 2) local parse fallback
-          if(!parsed){ parsed = parseNlp(line); }
+          const localParsed = parseNlp(line);
+          if(!parsed){ parsed = localParsed; }
           // 3) must have amount
-          if(!Number.isFinite(Number(parsed?.amount))){ skipped++; continue; }
-          const payload = await buildPayloadFromParsed(parsed, line, lastDate);
+          const haveAmount = Number.isFinite(Number(localParsed?.amount)) || Number.isFinite(Number(parsed?.amount));
+          if(!haveAmount){ skipped++; continue; }
+          const payload = await buildPayloadFromParsed(parsed, localParsed, line, lastDate);
           if(!payload.categoryId || !payload.type || !Number.isFinite(payload.amount) || payload.amount<=0){ skipped++; continue; }
           try{ await DB.addTransaction(payload); success++; }
           catch(_){ skipped++; }
