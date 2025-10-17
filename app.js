@@ -879,6 +879,11 @@
             const cats = await DB.getCategories();
             const hit = cats.find(c=> String(c.name).toLowerCase()===String(p.categoryName).toLowerCase());
             if(hit) catId = hit.id;
+            // 找不到則自動建立新分類
+            if(!catId){
+              const created = await DB.addCategory(String(p.categoryName).trim());
+              if(created && created.id){ catId = created.id; }
+            }
           }catch(_){ /* ignore */ }
         }
         if(!catId){
@@ -1032,10 +1037,14 @@
           if(aiAutoAddToggle?.checked){
             const cats = await DB.getCategories();
             const hit = (p.categoryName && cats.find(c=> String(c.name).toLowerCase()===String(p.categoryName).toLowerCase()))?.id;
+            let catId = hit || '';
+            if(!catId && p.categoryName){
+              try{ const created = await DB.addCategory(String(p.categoryName).trim()); if(created && created.id){ catId = created.id; } }catch(_){ }
+            }
             const payload = {
               date: p.date || today(),
               type: p.type || 'expense',
-              categoryId: hit || $('#txCategory')?.value || '',
+              categoryId: catId || $('#txCategory')?.value || '',
               currency: p.currency || 'TWD', rate: Number(p.rate)||1,
               amount: Number(p.amount)||0,
               claimAmount: Number(p.claimAmount)||0,
