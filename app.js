@@ -913,7 +913,7 @@
         return payload;
       }
       async function batchAdd(base, ctx, raw){
-        const lines = String(raw).split(/\r?\n|[;；]/).map(s=>s.trim()).filter(Boolean);
+        const lines = String(raw).split(/\r\n|\n|\r|[;；]/).map(s=>s.trim()).filter(Boolean);
         if(lines.length<=1) return false;
         aiAnswer.textContent = '批次處理中…';
         let success=0, skipped=0;
@@ -1016,9 +1016,9 @@
         // Prefer same-origin if available; fall back to candidate (user-configured)
         const base = (originOk || candidate).replace(/\/$/,'');
         aiAbort = new AbortController();
-        // Multi-line batch mode
-        const isBatch = /\r?\n/.test(text) || /[;；]/.test(text);
-        if(isBatch){
+        // Multi-line batch mode（以多種換行/分隔符判斷）
+        const parts = String(text).split(/\r\n|\n|\r|[;；]/).map(s=>s.trim()).filter(Boolean);
+        if(parts.length>1){
           const done = await batchAdd(base, context, text);
           if(done) return;
         }
