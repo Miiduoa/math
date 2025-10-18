@@ -857,10 +857,36 @@ function parseNlpQuick(text){
     return total + section + (number||0);
   }
   function parseAmount(str){
-    const m = String(str||'').match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/);
-    if(m) return Number(m[1].replace(/,/g,''));
-    const m2 = String(str||'').match(/([零〇一二兩三四五六七八九十百千萬]+)/);
-    if(m2){ const v = chineseToNumber(m2[1]); if(Number.isFinite(v)) return v; }
+    const raw = String(str||'');
+    // Remove obvious date/time/ordinal contexts to avoid false positives like "十月" -> 10
+    let s = raw
+      // Full/partial dates
+      .replace(/\b20\d{2}[-\/\.年]\d{1,2}[-\/\.月]\d{1,2}(?:日)?\b/g, ' ')
+      .replace(/\b\d{1,2}\/\d{1,2}\b/g, ' ')
+      // Times like 10:30 or 10：30
+      .replace(/\b\d{1,2}[:：]\d{2}(?:[:：]\d{2})?\b/g, ' ')
+      // Chinese numerals followed by time/date/counter units
+      .replace(/([零〇一二兩三四五六七八九十百千萬]+)\s*(月|日|號|号|點|点|時|小時|分鐘|分|秒|年|週|周|星期|禮拜|樓|層|次|件|篇|張|號|号)/g, ' ')
+      // Arabic numerals followed by the same units
+      .replace(/([0-9]+)\s*(月|日|號|号|點|点|時|小時|分鐘|分|秒|年|週|周|星期|禮拜|樓|層|次|件|篇|張|號|号)/g, ' ')
+      // Ordinals like 第十次、第10次
+      .replace(/第\s*([零〇一二兩三四五六七八九十百千萬]+|[0-9]+)\s*(次|筆|條|篇|項|名|個|位)/g, ' ');
+
+    // Pass 1: amount with explicit currency unit (e.g., 120元 / 十元)
+    const unitNum = s.match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(元|塊|圓|块|塊錢)/);
+    if(unitNum){ return Number(unitNum[1].replace(/,/g,'')); }
+    const unitCjk = s.match(/([零〇一二兩三四五六七八九十百千萬]+)\s*(元|塊|圓|块|塊錢)/);
+    if(unitCjk){ const v = chineseToNumber(unitCjk[1]); if(Number.isFinite(v)) return v; }
+
+    // Pass 2: currency code/synonym followed by number (e.g., NT$ 120, 台幣120)
+    const curLeading = s.match(/\b(TWD|NTD|NT\$|NT|台幣|新台幣)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\b/i);
+    if(curLeading){ return Number(curLeading[2].replace(/,/g,'')); }
+    const curTrailing = s.match(/\b([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(TWD|NTD|NT\$|NT|台幣|新台幣)\b/i);
+    if(curTrailing){ return Number(curTrailing[1].replace(/,/g,'')); }
+
+    // Pass 3: plain number not adjacent to date/time/counter units
+    const plain = s.match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/);
+    if(plain){ return Number(plain[1].replace(/,/g,'')); }
     return undefined;
   }
   // amount
@@ -907,7 +933,8 @@ async function aiStructParse(text, context){
 請根據提供的分類清單選擇 categoryName；對不到可輸出新的 categoryName（純文字），前端會自動建立分類。
 「不用請款/無需請款/不報帳/不需報帳/免請款」→ claimed=false 並 claimAmount=0；「已請款/完成請款/報帳完成」→ claimed=true。
 ${categoriesHint}
-無法判斷的欄位請省略。只輸出 JSON。` },
+嚴禁將日期/時間/序數視為金額（例如：十月、十點、10:30、10/31、第三次）。若無法確定金額，省略 amount 欄位，切勿臆測。
+只輸出 JSON，不要其他文字。` },
       { role:'user', content: text }
     ],
     temperature: 0.2
@@ -1111,7 +1138,7 @@ const server = http.createServer(async (req, res) => {
       const payload = {
         model: OPENAI_MODEL,
         messages: (mode==='struct') ? [
-          { role: 'system', content: `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD；若為 MM/DD 則年份取今年；支援 今天/昨天/前天/明天), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。金額可含中文數字。請優先從提供的分類清單選擇 categoryName，對不到可輸出新名稱，前端會自動建立。${Array.isArray(context?.categories)?'分類清單：'+context.categories.map(c=>c.name).join(', ').slice(0,800):''} 只輸出 JSON，不要其他文字。` },
+          { role: 'system', content: `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD；若為 MM/DD 則年份取今年；支援 今天/昨天/前天/明天), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。金額可含中文數字。請優先從提供的分類清單選擇 categoryName，對不到可輸出新名稱，前端會自動建立。${Array.isArray(context?.categories)?'分類清單：'+context.categories.map(c=>c.name).join(', ').slice(0,800):''} 嚴禁將日期/時間/序數視為金額（例如：十月、十點、10:30、10/31、第三次）。若不確定金額，省略 amount 欄位，切勿臆測。只輸出 JSON，不要其他文字。` },
           { role: 'user', content: messages?.[0]?.content || '' }
         ] : [
           { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
