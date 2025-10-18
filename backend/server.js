@@ -657,7 +657,12 @@ async function handleContextualAI(req, replyToken, userId, lineUidRaw, text){
     const isFraud = /(詐騙|被騙|盜刷|詐欺|騙走)/.test(t);
     if(isFraud){
       // Prefer AI struct parse to extract amount/date/note
-      let parsed = await aiStructParse(t, {});
+      let catCtx = {};
+      try{
+        const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+        catCtx = { categories: cats };
+      }catch(_){ catCtx = {}; }
+      let parsed = await aiStructParse(t, catCtx);
       parsed = mergeParsedAmountFromText(t, parsed||{});
       if(!parsed){ parsed = parseNlpQuick(t); }
       const amt = Number(parsed?.amount||0);
@@ -945,6 +950,36 @@ function mergeParsedAmountFromText(text, aiParsed){
   }catch{ return aiParsed||null; }
 }
 
+function validateAndNormalizeStruct(input){
+  try{
+    const o = input && typeof input==='object' ? input : {};
+    const out = {};
+    // type
+    const t = String(o.type||'').toLowerCase();
+    out.type = (t==='income' || t==='expense') ? t : 'expense';
+    // amount (must be finite and >0)
+    const amt = Number(o.amount);
+    if(Number.isFinite(amt) && amt>0){ out.amount = amt; }
+    // currency (normalize casing)
+    if(o.currency){ out.currency = String(o.currency).toUpperCase(); }
+    // date (YYYY-MM-DD)
+    if(o.date && /^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(String(o.date))){ out.date = String(o.date); }
+    // rate
+    const rate = Number(o.rate);
+    if(Number.isFinite(rate) && rate>0){ out.rate = rate; }
+    // claimAmount
+    const camt = Number(o.claimAmount);
+    if(Number.isFinite(camt) && camt>=0){ out.claimAmount = camt; }
+    // claimed
+    if(typeof o.claimed==='boolean'){ out.claimed = o.claimed; }
+    // categoryName
+    if(o.categoryName){ out.categoryName = String(o.categoryName).trim().slice(0,80); }
+    // note
+    if(o.note){ out.note = String(o.note).trim().slice(0,500); }
+    return out;
+  }catch{ return {}; }
+}
+
 async function aiStructParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
@@ -965,7 +1000,7 @@ ${categoriesHint}
 只輸出 JSON，不要其他文字。` },
       { role:'user', content: text }
     ],
-    temperature: 0.2
+    temperature: 0
   };
   const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
   const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
@@ -1173,7 +1208,7 @@ const server = http.createServer(async (req, res) => {
           { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
           ...messages
         ],
-        temperature: 0.4
+        temperature: (mode==='struct') ? 0 : 0.4
       };
       const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
       const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
@@ -1191,9 +1226,11 @@ const server = http.createServer(async (req, res) => {
         // struct 模式：嘗試解析 JSON
         if(mode==='struct'){
           try{
-            const json = JSON.parse(reply);
+            const raw = JSON.parse(reply);
+            const normalized = validateAndNormalizeStruct(raw);
+            const merged = mergeParsedAmountFromText(messages?.[0]?.content||'', normalized);
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            return res.end(JSON.stringify({ ok:true, provider:'openai', parsed: json }));
+            return res.end(JSON.stringify({ ok:true, provider:'openai', parsed: merged }));
           }catch(_){ /* fallthrough to plain text */ }
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2361,7 +2398,12 @@ const server = http.createServer(async (req, res) => {
               continue;
             }
             // Try AI struct parse first
-            let parsed = await aiStructParse(text, {});
+            let categoriesCtx = {};
+            try{
+              const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+              categoriesCtx = { categories: cats };
+            }catch(_){ categoriesCtx = {}; }
+            let parsed = await aiStructParse(text, categoriesCtx);
             parsed = mergeParsedAmountFromText(text, parsed||{});
             if(!parsed){ parsed = parseNlpQuick(text); }
             if(parsed && Number.isFinite(Number(parsed.amount))){
