@@ -1035,6 +1035,109 @@ ${categoriesHint}
   }catch(_){ return null; }
 }
 
+async function aiOpsParse(text, context){
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  if(!OPENAI_API_KEY){ return null; }
+  const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
+  const categoriesHint = catNames.length>0 ? `已知分類：${catNames.join(', ')}` : '';
+  const payload = {
+    model: OPENAI_MODEL,
+    messages: [
+      { role:'system', content: `你是記帳系統的操作代理，務必輸出嚴格 JSON（無多餘文字）。
+結構：{ op: 'add'|'update'|'delete'|'stats', criteria?: { date?: 'YYYY-MM-DD' 或 'MM/DD' 或 '今天/昨天/前天', amount?: number, noteContains?: string, categoryName?: string }, patch?: { amount?: number, date?: 'YYYY-MM-DD', note?: string, categoryName?: string, type?: 'income'|'expense', currency?: string, claimAmount?: number, claimed?: boolean } }。
+規則：
+- 若使用者表示要「更正/改/修正」，輸出 op='update'，將欲更改的新值放在 patch，將原本用來辨識哪一筆的條件放到 criteria。
+- 若表示要刪除某筆，輸出 op='delete' 並附上 criteria。
+- 若是單純新增紀錄，輸出 op='add'，其餘欄位略過（新增另有結構化流程）。
+- ${categoriesHint}
+只輸出 JSON。` },
+      { role:'user', content: text }
+    ],
+    temperature: 0
+  };
+  const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
+  const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+  const endpoint = `${apiBase}/chat/completions`;
+  try{
+    const data = await fetchJson(endpoint, {
+      method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(payload)
+    }, 20000);
+    const reply = data?.choices?.[0]?.message?.content || '';
+    try{ return JSON.parse(reply); }catch(_){ return null; }
+  }catch(_){ return null; }
+}
+
+function validateAndNormalizeOps(input){
+  try{
+    const o = input && typeof input==='object' ? input : {};
+    const out = {};
+    const op = String(o.op||'').toLowerCase();
+    if(['add','update','delete','stats'].includes(op)) out.op = op; else return null;
+    const critIn = o.criteria||{}; const patchIn = o.patch||{};
+    const criteria = {};
+    if(critIn.date){ criteria.date = String(critIn.date).trim().slice(0,20); }
+    const amt = Number(critIn.amount); if(Number.isFinite(amt) && amt>0) criteria.amount = amt;
+    if(critIn.noteContains){ criteria.noteContains = String(critIn.noteContains).trim().slice(0,80); }
+    if(critIn.categoryName){ criteria.categoryName = String(critIn.categoryName).trim().slice(0,80); }
+    const patch = {};
+    const pAmt = Number(patchIn.amount); if(Number.isFinite(pAmt) && pAmt>0) patch.amount = pAmt;
+    if(patchIn.date && /^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(String(patchIn.date))) patch.date = String(patchIn.date);
+    if(patchIn.note){ patch.note = String(patchIn.note).trim().slice(0,500); }
+    if(patchIn.categoryName){ patch.categoryName = String(patchIn.categoryName).trim().slice(0,80); }
+    const type = String(patchIn.type||'').toLowerCase(); if(['income','expense'].includes(type)) patch.type = type;
+    if(patchIn.currency){ patch.currency = String(patchIn.currency).toUpperCase(); }
+    const cAmt = Number(patchIn.claimAmount); if(Number.isFinite(cAmt) && cAmt>=0) patch.claimAmount = cAmt;
+    if(typeof patchIn.claimed==='boolean') patch.claimed = patchIn.claimed;
+    if(Object.keys(criteria).length>0) out.criteria = criteria;
+    if(Object.keys(patch).length>0) out.patch = patch;
+    return out;
+  }catch{ return null; }
+}
+
+async function findBestMatchingTransaction(userIdOrUid, criteria){
+  try{
+    const isDb = isDbEnabled();
+    const txs = isDb ? await pgdb.getTransactions(userIdOrUid) : fileStore.getTransactions(userIdOrUid||'anonymous');
+    const cats = isDb ? await pgdb.getCategories() : fileStore.getCategories(userIdOrUid||'anonymous');
+    const idToName = new Map(cats.map(c=>[c.id, c.name]));
+    let candidates = txs.slice(0,1000);
+    const noteContains = String(criteria?.noteContains||'').trim();
+    if(criteria?.date){
+      const now = new Date();
+      let ymd='';
+      if(/^(\d{1,2})\/(\d{1,2})$/.test(criteria.date)){
+        const m = criteria.date.match(/^(\d{1,2})\/(\d{1,2})$/);
+        ymd = `${now.getFullYear()}-${String(Number(m[1])).padStart(2,'0')}-${String(Number(m[2])).padStart(2,'0')}`;
+      }else if(/今天|昨天|前天/.test(criteria.date)){
+        const d = new Date();
+        if(/昨天/.test(criteria.date)) d.setDate(d.getDate()-1);
+        if(/前天/.test(criteria.date)) d.setDate(d.getDate()-2);
+        ymd = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      }else if(/^20\d{2}-\d{2}-\d{2}$/.test(criteria.date)){
+        ymd = criteria.date;
+      }
+      if(ymd) candidates = candidates.filter(t=> String(t.date)===ymd);
+    }
+    if(Number.isFinite(Number(criteria?.amount))){
+      const a = Number(criteria.amount);
+      candidates = candidates.filter(t=> Number(t.amount)===a);
+    }
+    if(noteContains){
+      const low = noteContains.toLowerCase();
+      candidates = candidates.filter(t=> String(t.note||'').toLowerCase().includes(low));
+    }
+    if(criteria?.categoryName){
+      const low = String(criteria.categoryName).toLowerCase();
+      candidates = candidates.filter(t=> String(idToName.get(t.categoryId)||'').toLowerCase()===low);
+    }
+    // pick most recent
+    candidates.sort((a,b)=> (String(b.date).localeCompare(String(a.date))) || (String(b.id).localeCompare(String(a.id))));
+    return candidates[0] || null;
+  }catch{ return null; }
+}
+
 function todayYmd(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 
 async function handleStatsQuery(userId, text){
@@ -2470,6 +2573,60 @@ const server = http.createServer(async (req, res) => {
             }
 
             // Try AI struct parse first
+            // Try AI operations intent first (update/delete/stats)
+            {
+              let opCtx = {};
+              try{
+                const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+                opCtx = { categories: cats };
+              }catch(_){ opCtx = {}; }
+              const ops = await aiOpsParse(text, opCtx);
+              const intent = validateAndNormalizeOps(ops);
+              if(intent && intent.op && intent.op!=='add'){
+                const uid2 = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                if(intent.op==='delete'){
+                  const hit = await findBestMatchingTransaction(isDbEnabled()?userId:uid2, intent.criteria||{});
+                  if(hit){
+                    if(isDbEnabled()) await pgdb.deleteTransaction(userId, hit.id);
+                    else fileStore.deleteTransaction(uid2, hit.id);
+                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'已刪除', subtitle: hit.date, lines:[`金額：${hit.currency} ${Number(hit.amount).toFixed(2)}`, hit.note?`備註：${hit.note}`:undefined].filter(Boolean), showHero:false, compact:true });
+                    await lineReply(replyToken, [{ type:'flex', altText:'已刪除', contents:bubble }]);
+                    continue;
+                  }
+                }
+                if(intent.op==='update'){
+                  const hit = await findBestMatchingTransaction(isDbEnabled()?userId:uid2, intent.criteria||{});
+                  if(hit){
+                    const patch={};
+                    if(Number.isFinite(Number(intent.patch?.amount)) && Number(intent.patch.amount)>0) patch.amount = Number(intent.patch.amount);
+                    if(intent.patch?.date) patch.date = intent.patch.date;
+                    if(intent.patch?.note) patch.note = intent.patch.note;
+                    if(intent.patch?.type) patch.type = intent.patch.type;
+                    if(intent.patch?.currency) patch.currency = intent.patch.currency;
+                    if(Number.isFinite(Number(intent.patch?.claimAmount)) && Number(intent.patch.claimAmount)>=0) patch.claimAmount = Number(intent.patch.claimAmount);
+                    if(typeof intent.patch?.claimed==='boolean') patch.claimed = intent.patch.claimed;
+                    if(intent.patch?.categoryName){
+                      try{
+                        const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid2));
+                        const hitCat = cats.find(c=> String(c.name).toLowerCase()===String(intent.patch.categoryName).toLowerCase());
+                        if(hitCat) patch.categoryId = hitCat.id;
+                      }catch(_){ }
+                    }
+                    let updated=null;
+                    if(isDbEnabled()) updated = await pgdb.updateTransaction(userId, hit.id, patch);
+                    else updated = fileStore.updateTransaction(uid2, hit.id, patch);
+                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'已更新', subtitle: updated.date, lines:[`金額：${updated.currency} ${Number(updated.amount).toFixed(2)}`, updated.note?`備註：${updated.note}`:undefined].filter(Boolean), showHero:false, compact:true });
+                    await lineReply(replyToken, [{ type:'flex', altText:'已更新', contents:bubble }]);
+                    continue;
+                  }
+                }
+                if(intent.op==='stats'){
+                  const stats = await handleStatsQuery(userId, text);
+                  if(stats){ const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'統計摘要', subtitle:'本月收入/支出/結餘', lines:[stats] }); await lineReply(replyToken, [{ type:'flex', altText:'統計摘要', contents:bubble }]); continue; }
+                }
+              }
+            }
+
             let categoriesCtx = {};
             try{
               const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
