@@ -521,6 +521,7 @@ function menuFlexBubble({ baseUrl='' }){
 
 // Simple in-memory guided add flow state
 const guidedFlow = new Map(); // userId -> { step, payload }
+const aiFeatureFlow = new Map(); // userId -> { kind, step }
 
 // AI contextual intent support (in-memory, single instance)
 const aiPending = new Map(); // actionId -> { userId, kind: 'add_tx'|'delete_tx', payload?, txId? }
@@ -1058,10 +1059,13 @@ async function aiChatText(userText, context){
     const data = await fetchJson(endpoint, {
       method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(payload)
     }, 20000);
+    if(!data || data.error){
+      return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
+    }
     const reply = data?.choices?.[0]?.message?.content || '';
-    return reply || '我目前無法產生回覆，稍後再試試看。';
+    return reply || heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
   }catch(_){
-    return '我目前無法產生回覆，稍後再試試看。';
+    return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
   }
 }
 
@@ -2253,6 +2257,20 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            // Feature menu trigger
+            if(/^功能$|^選單$|^menu$/i.test(text)){
+              const buttons = [
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'文字生成', data:'flow=feature&step=responses_text' } },
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'圖片理解', data:'flow=feature&step=vision' } },
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'網頁搜尋', data:'flow=feature&step=web_search' } },
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'文件搜尋', data:'flow=feature&step=file_search' } },
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'函式工具', data:'flow=feature&step=function_tools' } },
+                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'串流示範', data:'flow=feature&step=stream' } }
+              ];
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||'', title:'AI 功能選單', subtitle:'選擇一項示範', lines:[], buttons, showHero:false, compact:true });
+              await lineReply(replyToken, [{ type:'flex', altText:'功能選單', contents:bubble }]);
+              continue;
+            }
             // Admin: open menu or broadcast input handler
             if(isLineAdmin(lineUidRaw)){
               if(/^管理$|^admin$/i.test(text)){
