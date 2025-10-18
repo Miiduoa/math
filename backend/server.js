@@ -905,6 +905,17 @@ function parseNlpQuick(text){
   const iso = normalized.match(/(20\d{2})[-\/]?(\d{1,2})[-\/]?(\d{1,2})/);
   if(iso){ const y=Number(iso[1]); const m=String(Number(iso[2])).padStart(2,'0'); const d=String(Number(iso[3])).padStart(2,'0'); result.date=`${y}-${m}-${d}`; }
   if(!result.date){
+    // 支援 MM/DD（無年份）→ 以今年為準
+    const md = normalized.match(/\b(\d{1,2})\/(\d{1,2})\b/);
+    if(md){
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(Number(md[1])).padStart(2,'0');
+      const d = String(Number(md[2])).padStart(2,'0');
+      result.date = `${y}-${m}-${d}`;
+    }
+  }
+  if(!result.date){
     const now = new Date();
     const fmt = (d)=> `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     if(/今天/.test(t)) result.date = fmt(new Date());
@@ -933,14 +944,22 @@ function mergeParsedAmountFromText(text, aiParsed){
     if(hasLocal){
       merged.amount = localAmt;
     }else{
-      const t = String(text||'');
+      const raw = String(text||'');
+      // sanitize text by removing obvious date/time/ordinal contexts
+      const t = raw
+        .replace(/\b20\d{2}[-\/\.年]\d{1,2}[-\/\.月]\d{1,2}(?:日)?\b/g, ' ')
+        .replace(/\b\d{1,2}\/\d{1,2}\b/g, ' ')
+        .replace(/\b\d{1,2}[:：]\d{2}(?:[:：]\d{2})?\b/g, ' ')
+        .replace(/第\s*([零〇一二兩三四五六七八九十百千萬]+|[0-9]+)\s*(次|筆|條|篇|項|名|個|位)/g, ' ')
+        .replace(/([零〇一二兩三四五六七八九十百千萬]+)\s*(月|日|號|号|點|点|時|小時|分鐘|分|秒|年|週|周|星期|禮拜|樓|層|次|件|篇|張|號|号)/g, ' ')
+        .replace(/([0-9]+)\s*(月|日|號|号|點|点|時|小時|分鐘|分|秒|年|週|周|星期|禮拜|樓|層|次|件|篇|張|號|号)/g, ' ');
       const aiNum = Number.isFinite(aiAmt) && aiAmt>0 ? String(aiAmt) : '';
       let ok = false;
       if(aiNum){
-        const numBoundary = new RegExp(`(?:^|[^0-9])${aiNum}(?:[^0-9]|$)`);
-        const unitAfter = new RegExp(`${aiNum}\\s*(元|塊|圓|块|塊錢)`);
-        const unitBefore = new RegExp(`(TWD|NTD|NT\\$|NT|台幣|新台幣)\\s*${aiNum}`, 'i');
-        ok = unitAfter.test(t) || unitBefore.test(t) || numBoundary.test(t);
+        const unitAfter = new RegExp(`(?:^|[^0-9])${aiNum}\\s*(元|塊|圓|块|塊錢)(?:[^0-9]|$)`);
+        const unitBefore = new RegExp(`(TWD|NTD|NT\\$|NT|台幣|新台幣)\\s*${aiNum}(?:[^0-9]|$)`, 'i');
+        // 僅在有明確金額單位或幣別時才接受 AI 金額
+        ok = unitAfter.test(t) || unitBefore.test(t);
       }
       if(ok){ merged.amount = aiAmt; } else { delete merged.amount; }
     }
@@ -2397,6 +2416,59 @@ const server = http.createServer(async (req, res) => {
               }
               continue;
             }
+            // Multi-line batch add: split by newline/;； then handle each line
+            {
+              const lines = String(text||'').split(/\r\n|\n|\r|[;；]/).map(s=>String(s).trim()).filter(Boolean);
+              if(lines.length>1){
+                let success=0, skipped=0; let lastDate='';
+                let categoriesCtx = {};
+                try{
+                  const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+                  categoriesCtx = { categories: cats };
+                }catch(_){ categoriesCtx = {}; }
+                for(const line of lines){
+                  let parsed = await aiStructParse(line, categoriesCtx);
+                  parsed = mergeParsedAmountFromText(line, parsed||{});
+                  const localParsed = parseNlpQuick(line);
+                  if(!parsed){ parsed = localParsed; }
+                  const amt = Number(parsed?.amount);
+                  if(!Number.isFinite(amt) || amt<=0){ skipped++; continue; }
+                  const payload = {
+                    date: parsed.date || lastDate || todayYmd(),
+                    type: parsed.type || 'expense',
+                    categoryId: '',
+                    currency: parsed.currency || 'TWD',
+                    rate: Number(parsed.rate)||1,
+                    amount: amt,
+                    claimAmount: Number(parsed.claimAmount)||0,
+                    claimed: parsed.claimed===true,
+                    note: String(parsed.note||line||'')
+                  };
+                  if(parsed.categoryName){
+                    try{
+                      const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous'));
+                      const hit = cats.find(c=> String(c.name).toLowerCase()===String(parsed.categoryName).toLowerCase());
+                      if(hit) payload.categoryId = hit.id;
+                    }catch(_){ }
+                  }
+                  if(!payload.categoryId){
+                    try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
+                  }
+                  try{
+                    if(isDbEnabled()) await pgdb.addTransaction(userId, payload);
+                    else { const uid2 = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous'); fileStore.addTransaction(uid2, payload); }
+                    success++;
+                    if(payload.date) lastDate = payload.date;
+                    try{ if(payload.note && payload.categoryId){ await trainModelFor(userId||'anonymous', payload.note, payload.categoryId); } }catch(_){ }
+                  }catch(_){ skipped++; }
+                }
+                const summary = `已新增 ${success} 筆，略過 ${skipped} 筆。`;
+                const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'批次新增完成', subtitle: todayYmd(), lines:[summary], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'批次新增完成', contents:bubble }]);
+                continue;
+              }
+            }
+
             // Try AI struct parse first
             let categoriesCtx = {};
             try{
