@@ -1939,6 +1939,41 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
+            // Feature flow handlers (demo for OpenAI Responses capability fallbacks)
+            if(flow==='feature'){
+              const step = String(dataObj.step||'');
+              if(step==='responses_text'){
+                const text = '生成一段關於彩虹獨角獸的一句短篇故事。';
+                const reply = await aiChatText(text, { demo:true });
+                await lineReply(replyToken, [{ type:'text', text: reply.slice(0,1000) }]);
+                continue;
+              }
+              if(step==='vision'){
+                const info = '圖片理解示範：目前未上傳圖片，請直接貼圖片網址與問題，我會嘗試描述內容。';
+                await lineReply(replyToken, [{ type:'text', text: info }]);
+                continue;
+              }
+              if(step==='web_search'){
+                const info = '網頁搜尋示範：目前未接上外部搜尋服務。你可以先告訴我關鍵字，我用一般對話先提供方向。';
+                await lineReply(replyToken, [{ type:'text', text: info }]);
+                continue;
+              }
+              if(step==='file_search'){
+                const info = '文件搜尋示範：目前未接上向量資料庫。你可先上傳文字檔並詢問重點，我用一般對話回覆摘要。';
+                await lineReply(replyToken, [{ type:'text', text: info }]);
+                continue;
+              }
+              if(step==='function_tools'){
+                const info = '函式工具示範：你可以說「查台北天氣」，我會嘗試以內建邏輯回覆（暫無外部 API）。';
+                await lineReply(replyToken, [{ type:'text', text: info }]);
+                continue;
+              }
+              if(step==='stream'){
+                const info = '串流示範：目前 LINE 不支援逐字串流顯示，我會在後端完整生成後一次回覆。';
+                await lineReply(replyToken, [{ type:'text', text: info }]);
+                continue;
+              }
+            }
             // Admin actions
             if(flow==='admin'){
               const replyToken = ev.replyToken;
