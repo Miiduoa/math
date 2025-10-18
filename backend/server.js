@@ -1035,6 +1035,36 @@ ${categoriesHint}
   }catch(_){ return null; }
 }
 
+async function aiChatText(userText, context){
+  try{
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+    const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    if(!OPENAI_API_KEY){
+      return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
+    }
+    const payload = {
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
+        { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context||{}).slice(0, 4000)}` },
+        { role: 'user', content: String(userText||'') }
+      ],
+      temperature: 0.4
+    };
+    const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
+    const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+    const endpoint = `${apiBase}/chat/completions`;
+    const data = await fetchJson(endpoint, {
+      method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(payload)
+    }, 20000);
+    const reply = data?.choices?.[0]?.message?.content || '';
+    return reply || '我目前無法產生回覆，稍後再試試看。';
+  }catch(_){
+    return '我目前無法產生回覆，稍後再試試看。';
+  }
+}
+
 async function aiOpsParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
@@ -2696,16 +2726,11 @@ const server = http.createServer(async (req, res) => {
               await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
               continue;
             }
-            // Fallback help
+            // Fallback: chat with AI
             {
-              const lines = [
-                '記帳：支出 120 餐飲 早餐 2025-10-12',
-                '查詢：這月支出多少？',
-                '清單：最近交易、未請款、分類支出',
-                '功能：輸入「選單」開啟功能選單'
-              ];
-              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'可用指令', subtitle:'也支援自然語言', lines });
-              await lineReply(replyToken, [{ type:'flex', altText:'使用說明', contents:bubble }]);
+              const ctx = { transactions: await (isDbEnabled()? pgdb.getTransactions(userId) : fileStore.getTransactions(userId||'anonymous')), categories: await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')), settings: await (isDbEnabled()? pgdb.getSettings(userId) : fileStore.getSettings?.(userId||'anonymous')) };
+              const replyText = await aiChatText(text, ctx);
+              await lineReply(replyToken, [{ type:'text', text: String(replyText||'') }]);
             }
           }
         }catch(err){ try{ console.error('line handle error', err); }catch(_){ } }
