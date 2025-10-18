@@ -1178,8 +1178,8 @@
       const curTrailing = s.match(/\b([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(TWD|NTD|NT\$|NT|台幣|新台幣)\b/i);
       if(curTrailing){ return Number(curTrailing[1].replace(/,/g,'')); }
 
-      // Pass 3: plain number not adjacent to date/time/counter units
-      const plain = s.match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)/);
+      // Pass 3: plain number (prefer long digits, then thousands with comma)
+      const plain = s.match(/([0-9]+(?:\.[0-9]+)?|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?)/);
       if(plain){ return Number(plain[1].replace(/,/g,'')); }
       return undefined;
     }
