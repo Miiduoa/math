@@ -896,10 +896,18 @@ async function aiStructParse(text, context){
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
   const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
   if(!OPENAI_API_KEY){ return null; }
+  const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
+  const categoriesHint = catNames.length>0 ? `有效分類（優先從此清單選擇 categoryName；對不到可輸出新的文字並由前端建立）：${catNames.join(', ')}` : '';
   const payload = {
     model: OPENAI_MODEL,
     messages: [
-      { role:'system', content:'你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。欄位: type(income|expense; 預設 expense), amount(number), currency(string; 例如 TWD USD), date(YYYY-MM-DD; 支援 今天/昨天/前天/明天 相對日期), categoryName(string), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。金額可含逗號或中文數字（如 一百二十/兩百），幣別同義字（台幣/新台幣/NT/NTD/NT$ 視為 TWD）。「不用請款/無需請款/不報帳/不需報帳/免請款」→ claimed=false 並 claimAmount=0。「已請款/完成請款/報帳完成」→ claimed=true。無法判斷的欄位請省略。只輸出 JSON。'},
+      { role:'system', content: `你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。
+欄位: type(income|expense; 預設 expense), amount(number), currency(string; 例如 TWD USD), date(YYYY-MM-DD; 支援 今天/昨天/前天/明天，相對日期；若輸入為 MM/DD 則年份取今年), categoryName(string), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。
+金額可含逗號或中文數字（如 一百二十/兩百），幣別同義字（台幣/新台幣/NT/NTD/NT$ 視為 TWD）。
+請根據提供的分類清單選擇 categoryName；對不到可輸出新的 categoryName（純文字），前端會自動建立分類。
+「不用請款/無需請款/不報帳/不需報帳/免請款」→ claimed=false 並 claimAmount=0；「已請款/完成請款/報帳完成」→ claimed=true。
+${categoriesHint}
+無法判斷的欄位請省略。只輸出 JSON。` },
       { role:'user', content: text }
     ],
     temperature: 0.2
@@ -1103,7 +1111,7 @@ const server = http.createServer(async (req, res) => {
       const payload = {
         model: OPENAI_MODEL,
         messages: (mode==='struct') ? [
-          { role: 'system', content: '你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。只輸出 JSON，不要其他文字。' },
+          { role: 'system', content: `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD；若為 MM/DD 則年份取今年；支援 今天/昨天/前天/明天), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。金額可含中文數字。請優先從提供的分類清單選擇 categoryName，對不到可輸出新名稱，前端會自動建立。${Array.isArray(context?.categories)?'分類清單：'+context.categories.map(c=>c.name).join(', ').slice(0,800):''} 只輸出 JSON，不要其他文字。` },
           { role: 'user', content: messages?.[0]?.content || '' }
         ] : [
           { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
