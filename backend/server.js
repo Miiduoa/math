@@ -658,6 +658,7 @@ async function handleContextualAI(req, replyToken, userId, lineUidRaw, text){
     if(isFraud){
       // Prefer AI struct parse to extract amount/date/note
       let parsed = await aiStructParse(t, {});
+      parsed = mergeParsedAmountFromText(t, parsed||{});
       if(!parsed){ parsed = parseNlpQuick(t); }
       const amt = Number(parsed?.amount||0);
       if(Number.isFinite(amt) && amt>0){
@@ -915,6 +916,33 @@ function parseNlpQuick(text){
   // note
   result.note = t;
   return result;
+}
+
+function mergeParsedAmountFromText(text, aiParsed){
+  try{
+    const local = parseNlpQuick(text);
+    const merged = Object.assign({}, aiParsed||{});
+    const localAmt = Number(local?.amount);
+    const aiAmt = Number(aiParsed?.amount);
+    const hasLocal = Number.isFinite(localAmt) && localAmt>0;
+    if(hasLocal){
+      merged.amount = localAmt;
+    }else{
+      const t = String(text||'');
+      const aiNum = Number.isFinite(aiAmt) && aiAmt>0 ? String(aiAmt) : '';
+      let ok = false;
+      if(aiNum){
+        const numBoundary = new RegExp(`(?:^|[^0-9])${aiNum}(?:[^0-9]|$)`);
+        const unitAfter = new RegExp(`${aiNum}\\s*(元|塊|圓|块|塊錢)`);
+        const unitBefore = new RegExp(`(TWD|NTD|NT\\$|NT|台幣|新台幣)\\s*${aiNum}`, 'i');
+        ok = unitAfter.test(t) || unitBefore.test(t) || numBoundary.test(t);
+      }
+      if(ok){ merged.amount = aiAmt; } else { delete merged.amount; }
+    }
+    if(local?.currency && !merged.currency){ merged.currency = local.currency; }
+    if(local?.date && !merged.date){ merged.date = local.date; }
+    return merged;
+  }catch{ return aiParsed||null; }
 }
 
 async function aiStructParse(text, context){
@@ -2334,6 +2362,7 @@ const server = http.createServer(async (req, res) => {
             }
             // Try AI struct parse first
             let parsed = await aiStructParse(text, {});
+            parsed = mergeParsedAmountFromText(text, parsed||{});
             if(!parsed){ parsed = parseNlpQuick(text); }
             if(parsed && Number.isFinite(Number(parsed.amount))){
               const payload = {
