@@ -1547,8 +1547,17 @@
     // tabs
     const tabs = $$('.tab-btn');
     function showTab(name){
-      document.querySelectorAll('[data-tab]').forEach(el=>{
-        if(el.getAttribute('data-tab')===name) el.classList.remove('hidden'); else el.classList.add('hidden');
+      const all = Array.from(document.querySelectorAll('[data-tab]'));
+      all.forEach(el=>{
+        const isTarget = el.getAttribute('data-tab')===name;
+        if(isTarget){
+          el.classList.remove('hidden');
+          el.style.opacity='0'; el.style.transform='translateY(4px)';
+          requestAnimationFrame(()=>{ el.style.opacity='1'; el.style.transform='translateY(0)'; });
+        }else{
+          el.classList.add('hidden');
+          el.style.opacity=''; el.style.transform='';
+        }
       });
       tabs.forEach(btn=>{
         if(btn.getAttribute('data-tab-target')===name) btn.classList.add('active'); else btn.classList.remove('active');
