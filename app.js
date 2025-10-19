@@ -184,6 +184,50 @@
   }
 
   function bindEvents(){
+    // AI Responses panel bindings
+    async function callResponsesApi(path, body){
+      try{
+        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
+        const base = (originOk || '').replace(/\/$/,'');
+        if(!base){ throw new Error('no base url'); }
+        const resp = await fetch(`${base}${path}`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body||{}) });
+        const j = await resp.json().catch(()=>({ ok:false }));
+        if(!resp.ok || !j.ok){ throw new Error('upstream'); }
+        return String(j.output||'');
+      }catch(err){ return '呼叫失敗，請稍後再試'; }
+    }
+    const respOut = $('#respOutput');
+    $('#respTextBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/responses/text', { input: text });
+    });
+    $('#respVisionBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      const imageUrl = $('#respImageUrl')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/responses/vision', { text, imageUrl });
+    });
+    $('#respWebBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/responses/web_search', { input: text });
+    });
+    $('#respFileBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/responses/file_search', { input: text });
+    });
+    $('#respStreamBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/responses/stream', { input: text });
+    });
+    $('#respAgentsBtn')?.addEventListener('click', async ()=>{
+      const text = $('#respInput')?.value||'';
+      respOut.textContent = '思考中…';
+      respOut.textContent = await callResponsesApi('/api/ai/agents/triage', { input: text });
+    });
     // 手動同步：將本機 IndexedDB 資料上傳到伺服器
     document.getElementById('syncBtn')?.addEventListener('click', async ()=>{
       try{

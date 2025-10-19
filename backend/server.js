@@ -1068,6 +1068,115 @@ async function aiChatText(userText, context){
   }
 }
 
+async function aiResponsesText(userText){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const resp = await client.responses.create({ model, input: String(userText||'') });
+    return String(resp?.output_text||'');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesVision(text, imageUrl){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const resp = await client.responses.create({
+      model,
+      input: [
+        { role:'user', content:[ { type:'input_text', text: String(text||'') }, { type:'input_image', image_url: String(imageUrl||'') } ] }
+      ]
+    });
+    return String(resp?.output_text||'');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesWebSearch(userText){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const resp = await client.responses.create({ model, tools:[ { type:'web_search' } ], input: String(userText||'') });
+    return String(resp?.output_text||'');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesFileSearch(userText){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const vectorStoreId = process.env.VECTOR_STORE_ID || '';
+    if(!vectorStoreId){ return '尚未設定 VECTOR_STORE_ID，無法使用檔案搜尋。'; }
+    const resp = await client.responses.create({
+      model,
+      input: String(userText||''),
+      tools: [ { type:'file_search', vector_store_ids:[ vectorStoreId ] } ]
+    });
+    return String(resp?.output_text||'');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesFunctionTool(userText){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const tools = [
+      {
+        type:'function',
+        name:'get_weather',
+        description:'Get current temperature for a given location.',
+        parameters:{ type:'object', properties:{ location:{ type:'string', description:'City and country e.g. Bogotá, Colombia' } }, required:['location'], additionalProperties:false },
+        strict:true
+      }
+    ];
+    const resp = await client.responses.create({ model, input:[ { role:'user', content:String(userText||'') } ], tools });
+    return String(resp?.output?.[0]?.to_json?.() || resp?.output_text || '');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesMcp(userText){
+  try{
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const resp = await client.responses.create({
+      model,
+      tools:[ { type:'mcp', server_label:'dmcp', server_description:'A Dungeons and Dragons MCP server to assist with dice rolling.', server_url:'https://dmcp-server.deno.dev/sse', require_approval:'never' } ],
+      input: String(userText||'')
+    });
+    return String(resp?.output_text||'');
+  }catch(err){ return ''; }
+}
+
+async function aiResponsesStreamOnce(userText){
+  try{
+    const { OpenAI } = await import('openai');
+    const client = new OpenAI();
+    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    // For LINE we aggregate stream and return as one message
+    const stream = await client.responses.create({ model, input:[ { role:'user', content:String(userText||'') } ], stream:true });
+    let out='';
+    for await (const ev of stream){ out += String(ev?.output_text||''); }
+    return out || '';
+  }catch(err){ return ''; }
+}
+
+async function aiAgentsTriage(userText){
+  try{
+    const mod = await import('@openai/agents');
+    const { Agent, run } = mod;
+    const spanishAgent = new Agent({ name:'Spanish agent', instructions:'You only speak Spanish.' });
+    const englishAgent = new Agent({ name:'English agent', instructions:'You only speak English' });
+    const triageAgent = new Agent({ name:'Triage agent', instructions:'Handoff to the appropriate agent based on the language of the request.', handoffs:[ spanishAgent, englishAgent ] });
+    const result = await run(triageAgent, String(userText||''));
+    return String(result?.finalOutput||'');
+  }catch(err){ return ''; }
+}
+
 async function aiOpsParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
@@ -2761,6 +2870,78 @@ const server = http.createServer(async (req, res) => {
     console.error(err);
     res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ ok: false, error: 'server_error' }));
+  }
+
+  // Agents triage demo endpoint
+  if (req.method === 'POST' && reqPath === '/api/ai/agents/triage'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiAgentsTriage(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (text)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/text'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesText(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (vision)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/vision'){
+    const raw = await parseBody(req);
+    const { text='', imageUrl='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesVision(text, imageUrl);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (web_search)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/web_search'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesWebSearch(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (file_search)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/file_search'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesFileSearch(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (function tool)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/function_tool'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesFunctionTool(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (MCP)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/mcp'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesMcp(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
+  }
+
+  // OpenAI Responses API (stream aggregated)
+  if (req.method === 'POST' && reqPath === '/api/ai/responses/stream'){
+    const raw = await parseBody(req);
+    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+    const out = await aiResponsesStreamOnce(input);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, output: out }));
   }
 });
 

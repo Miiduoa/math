@@ -216,6 +216,23 @@
         </div>
         <div id="modelInspectView" class="card" style="margin-top:8px; display:none; max-height:280px; overflow:auto"></div>
       </div>
+      <hr style="margin:12px 0; opacity:.2">
+      <div id="aiResponses" class="assistant">
+        <h3>AI Responses</h3>
+        <div class="inline">
+          <input id="respInput" type="text" placeholder="輸入問題或文字…" style="flex:1">
+          <button id="respTextBtn" class="secondary">文字</button>
+          <button id="respVisionBtn" class="secondary">圖片理解</button>
+          <button id="respWebBtn" class="secondary">網路搜尋</button>
+          <button id="respFileBtn" class="secondary">檔案搜尋</button>
+          <button id="respStreamBtn" class="secondary">串流</button>
+          <button id="respAgentsBtn" class="ghost">Agents</button>
+        </div>
+        <div class="inline" style="margin-top:6px">
+          <input id="respImageUrl" type="url" placeholder="圖片網址（圖片理解可用）" style="flex:1">
+        </div>
+        <div id="respOutput" class="card" style="margin-top:8px; max-height:220px; overflow:auto"></div>
+      </div>
     </section>
 
     <section class="card" data-tab="calendar">
