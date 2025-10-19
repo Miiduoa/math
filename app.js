@@ -1633,7 +1633,11 @@
         if(btn.getAttribute('data-tab-target')===name) btn.classList.add('active'); else btn.classList.remove('active');
       });
     }
-    tabs.forEach(btn=> btn.addEventListener('click', ()=> showTab(btn.getAttribute('data-tab-target'))));
+    tabs.forEach(btn=> btn.addEventListener('click', ()=>{
+      // haptic-like micro interaction on mobile
+      try{ if('vibrate' in navigator) navigator.vibrate?.(10); }catch(_){ }
+      showTab(btn.getAttribute('data-tab-target'))
+    }));
     showTab('ledger');
     if($('#statsMode')){
       $('#statsMode').addEventListener('change', renderChart);
