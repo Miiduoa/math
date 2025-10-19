@@ -1398,6 +1398,8 @@
     const modeSel = $('#statsMode');
     const root = $('#statsChart');
     const details = $('#statsDetails');
+    const donutRoot = $('#statsDonut');
+    const compareRoot = $('#statsCompare');
     if(!modeSel || !root){ return; }
     const mode = modeSel.value;
     DB.getTransactions().then(items=>{
@@ -1419,6 +1421,37 @@
         if(!details) return;
         details.innerHTML = rows.map(r=>`<div>${r}</div>`).join('');
       }
+
+      // donut by category (current month expenses)
+      (function(){
+        if(!donutRoot) return;
+        const ym = `${y}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+        const monthTx = curYear.filter(t=> (t.date||'').startsWith(ym) && t.type==='expense');
+        const byCat = monthTx.reduce((m,t)=>{ m.set(t.categoryId, (m.get(t.categoryId)||0)+toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1)); return m; }, new Map());
+        const rows = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,4);
+        const total = rows.reduce((s, [,v])=> s+v, 0) || 1;
+        let p1=0, p2=0, p3=0; const segs=['#0ea5e9','#38bdf8','#7dd3fc','#93c5fd'];
+        const vals = rows.map(([,v])=> Math.round((v/total)*100));
+        p1 = vals[0]||0; p2 = p1 + (vals[1]||0); p3 = p2 + (vals[2]||0);
+        donutRoot.innerHTML = `<div class="donut" style="--p1:${p1}%;--p2:${p2}%;--p3:${p3}%;--seg1:${segs[0]};--seg2:${segs[1]};--seg3:${segs[2]};--seg4:${segs[3]}"></div>
+          <div class="donut-legend">${rows.map((r,i)=>`<div class="legend-item"><span class="legend-dot" style="background:${segs[i]}"></span>${r[0]}：$${formatAmount(r[1])}</div>`).join('')}</div>`;
+      })();
+
+      // income vs expense compare (current month)
+      (function(){
+        if(!compareRoot) return;
+        const ym = `${y}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+        const monthTx = curYear.filter(t=> (t.date||'').startsWith(ym));
+        const inc = monthTx.filter(t=>t.type==='income').reduce((s,t)=> s+toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1),0);
+        const exp = monthTx.filter(t=>t.type==='expense').reduce((s,t)=> s+toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1),0);
+        const max = Math.max(1, inc, exp);
+        compareRoot.innerHTML = [`收入 $${formatAmount(inc)}`,`支出 $${formatAmount(exp)}`].map((label, idx)=>{
+          const val = idx===0 ? inc : exp;
+          const h = Math.round((val/max)*180)+8;
+          const cls = idx===0 ? 'bar' : 'bar negative';
+          return `<div class="${cls}" title="${label}" style="height:${h}px"></div>`;
+        }).join('');
+      })();
 
       if(mode==='yearly'){
         const entries = Array.from(byYear.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
@@ -1633,12 +1666,23 @@
         if(btn.getAttribute('data-tab-target')===name) btn.classList.add('active'); else btn.classList.remove('active');
       });
     }
+    const indicator = document.getElementById('tabIndicator');
+    function moveIndicator(name){
+      if(!indicator) return;
+      const idx = ['ledger','stats','calendar','assistant'].indexOf(name);
+      if(idx<0) return;
+      const percent = idx * 25; // 預設四個分頁
+      indicator.style.transform = `translateX(calc(${percent}% + ${idx*2}px))`;
+    }
     tabs.forEach(btn=> btn.addEventListener('click', ()=>{
       // haptic-like micro interaction on mobile
       try{ if('vibrate' in navigator) navigator.vibrate?.(10); }catch(_){ }
-      showTab(btn.getAttribute('data-tab-target'))
+      const name = btn.getAttribute('data-tab-target');
+      showTab(name);
+      moveIndicator(name);
     }));
     showTab('ledger');
+    moveIndicator('ledger');
     if($('#statsMode')){
       $('#statsMode').addEventListener('change', renderChart);
       renderChart();

@@ -157,6 +157,15 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
 .chart{height:200px;display:grid;align-items:end;gap:6px;grid-auto-flow:column;border-top:1px dashed var(--glass-border);padding-top:12px}
 .bar{background:linear-gradient(180deg,#22d3ee,#0ea5e9);border-radius:6px;min-width:10px}
 .chart .bar.negative{background:linear-gradient(180deg,#fca5a5,#ef4444)}
+/* donut */
+.donut{position:relative;width:220px;height:220px;border-radius:50%;background:
+  conic-gradient(var(--seg1,#0ea5e9) 0 var(--p1,0%), var(--seg2,#38bdf8) var(--p1,0%) var(--p2,0%), var(--seg3,#7dd3fc) var(--p2,0%) var(--p3,0%), var(--seg4,#93c5fd) var(--p3,0%) 100%),
+  radial-gradient(circle at center, transparent 58%, rgba(255,255,255,0.8) 59%);
+  box-shadow:var(--shadow);
+}
+.donut-legend{display:grid;gap:6px;margin-top:8px}
+.legend-item{display:flex;align-items:center;gap:8px}
+.legend-dot{width:10px;height:10px;border-radius:50%}
 
 .calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
 #calendarGrid{-webkit-overflow-scrolling:touch}
@@ -187,9 +196,10 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
 .advanced-on .adv{display:flex}
 
 .tabs{display:flex;gap:8px;margin-bottom:8px}
-.tabs{display:inline-flex;align-items:center;border:1px solid var(--glass-border);background:var(--glass-bg-strong);border-radius:9999px;padding:4px;gap:4px;backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));position:relative}
+.tabs{display:inline-flex;align-items:center;border:1px solid var(--glass-border);background:var(--glass-bg-strong);border-radius:9999px;padding:4px;gap:4px;backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));position:relative;overflow:hidden}
 .tabs::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--glass-highlight),transparent 40%);opacity:.28}
 .tabs::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 1px 0 var(--glass-innerline)}
+.tabs .indicator{position:absolute;top:4px;bottom:4px;width:calc(25% - 6px); /* 預設四個 */ background:rgba(255,255,255,0.55);border:1px solid var(--glass-border);border-radius:9999px;transition:transform var(--motion, .18s) ease;will-change:transform;box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 4px 12px rgba(14,165,233,0.16)}
 .tab-btn{background:transparent;border:0;border-radius:9999px;padding:8px 12px;cursor:pointer;color:var(--text);height:36px;min-width:64px;font-weight:600}
 .tab-btn.active{background:rgba(255,255,255,0.9);border:1px solid var(--glass-border);box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 6px 16px rgba(14,165,233,0.18);color:#0b4a6f;transition:background var(--motion, .18s) ease, color var(--motion, .18s) ease}
 

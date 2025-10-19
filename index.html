@@ -45,6 +45,7 @@
 
   <main class="container">
     <nav class="tabs bottom">
+      <div class="indicator" id="tabIndicator" aria-hidden="true"></div>
       <button class="tab-btn active" data-tab-target="ledger">記帳</button>
       <button class="tab-btn" data-tab-target="stats">統計</button>
       <button class="tab-btn" data-tab-target="calendar">月曆</button>
@@ -183,7 +184,11 @@
           </select>
         </div>
       </div>
-      <div id="statsChart" class="chart"></div>
+      <div id="statsChart" class="chart" aria-label="主要圖表"></div>
+      <div class="grid" style="margin-top:8px">
+        <div class="card"><h3>分類占比</h3><div id="statsDonut" class="chart" aria-label="分類甜甜圈"></div></div>
+        <div class="card"><h3>收入 vs 支出</h3><div id="statsCompare" class="chart" aria-label="對比圖"></div></div>
+      </div>
       <div id="statsDetails" class="card" style="margin-top:8px"></div>
     </section>
 
