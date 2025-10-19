@@ -491,6 +491,7 @@ function glassFlexBubble({ baseUrl='', title='', subtitle='', lines=[], buttons=
 // Build main menu Flex bubble for LINE bot
 function menuFlexBubble({ baseUrl='' }){
   const rows = [
+    // 記帳與查詢
     [
       { label:'記一筆', data:'flow=add&step=start', style:'primary' },
       { label:'最近交易', text:'最近交易', style:'secondary' }
@@ -500,13 +501,31 @@ function menuFlexBubble({ baseUrl='' }){
       { label:'分類支出', text:'分類支出', style:'secondary' }
     ],
     [
-      { label:'統計摘要', text:'查帳', style:'secondary' },
+      { label:'統計摘要', text:'統計摘要', style:'secondary' },
+      { label:'月曆', text:'月曆', style:'secondary' }
+    ],
+    // AI 與批次
+    [
+      { label:'AI 助理', text:'AI', style:'secondary' },
+      { label:'批次新增', text:'批次新增', style:'secondary' }
+    ],
+    // 記事與提醒（之後將串連到對應 API/意圖）
+    [
+      { label:'新增記事', text:'新增記事', style:'secondary' },
+      { label:'記事清單', text:'記事清單', style:'secondary' }
+    ],
+    [
+      { label:'新增提醒', text:'新增提醒', style:'secondary' },
+      { label:'提醒清單', text:'提醒清單', style:'secondary' }
+    ],
+    // 網頁
+    [
       { label:'開啟網頁版', uri: baseUrl||'https://example.com', style:'link' }
     ]
   ];
   const contents = [];
   contents.push({ type:'text', text:'功能選單', weight:'bold', size:'lg', color:'#0f172a' });
-  contents.push({ type:'text', text:'在這裡可以快速記帳或查看資訊', size:'xs', color:'#475569', wrap:true, margin:'xs' });
+  contents.push({ type:'text', text:'快速記帳、查詢、記事、提醒與 AI 助理', size:'xs', color:'#475569', wrap:true, margin:'xs' });
   for(const row of rows){
     contents.push({
       type:'box', layout:'horizontal', spacing:'md', contents: row.map(btn=>{
