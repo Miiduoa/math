@@ -2973,11 +2973,14 @@ function heuristicReply(messages, context){
 function fetchJson(url, opts, timeoutMs=15000){
   return new Promise((resolve, reject)=>{
     const u = new URL(url);
-    const req = https.request({
+    const isHttp = u.protocol === 'http:';
+    const transport = isHttp ? http : https;
+    const req = transport.request({
       hostname: u.hostname,
-      path: u.pathname + u.search,
-      method: opts?.method||'GET',
-      headers: opts?.headers||{}
+      port: u.port || (isHttp ? 80 : 443),
+      path: `${u.pathname}${u.search}`,
+      method: opts?.method || 'GET',
+      headers: opts?.headers || {}
     }, (resp)=>{
       const chunks=[];
       resp.on('data', c=>chunks.push(c));
@@ -2993,5 +2996,4 @@ function fetchJson(url, opts, timeoutMs=15000){
     req.end();
   });
 }
-
 
