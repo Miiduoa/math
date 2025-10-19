@@ -568,6 +568,40 @@ function seenAndMarkRecent(userId, payload, ttlMs=120000){
   }catch{ return false; }
 }
 
+async function computeNudges(userId){
+  try{
+    const isDb = isDbEnabled();
+    const txs = isDb ? await pgdb.getTransactions(userId) : fileStore.getTransactions(userId||'anonymous');
+    const settings = isDb ? await pgdb.getSettings(userId) : (fileStore.getSettings?.(userId||'anonymous')||{ baseCurrency:'TWD', monthlyBudgetTWD:0, savingsGoalTWD:0, nudges:true, appearance:'system', categoryBudgets:{} });
+    const now = new Date();
+    const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const thisMonth = txs.filter(t=> (t.date||'').startsWith(ym));
+    const toBase = (t)=> Number(t.amount||0) * (t.type==='income'?1:-1);
+    const spend = thisMonth.filter(t=>t.type==='expense').reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    const income = thisMonth.filter(t=>t.type==='income').reduce((s,t)=> s + (Number(t.amount)||0), 0);
+    const unclaimed = txs.filter(t=> t.type==='expense' && t.claimed!==true);
+    // frequent item (heuristic): top note keyword
+    const noteWords = {};
+    for(const t of thisMonth){ const note = String(t.note||'').trim(); if(!note) continue; const w = note.replace(/\s+/g,'').slice(0,6); if(!w) continue; noteWords[w]=(noteWords[w]||0)+1; }
+    const topWord = Object.entries(noteWords).sort((a,b)=> b[1]-a[1])[0]?.[0] || '';
+    const out = [];
+    // Nudge 1: Budget/overspend
+    if(Number(settings.monthlyBudgetTWD||0)>0){
+      const pct = (spend / Math.max(1, Number(settings.monthlyBudgetTWD))) * 100;
+      if(pct >= 80){ out.push({ key:'budget_guardrail', title:`本月支出已達 ${pct.toFixed(0)}% 預算，想設提醒嗎？`, cta:'設定提醒', kind:'settings' }); }
+    }else{
+      if(spend>=1000){ out.push({ key:'budget_invite', title:'建立每月預算，讓你更容易守住目標', cta:'設定預算', kind:'settings' }); }
+    }
+    // Nudge 2: Unclaimed expenses
+    if(unclaimed.length>=3){ const sumUn = unclaimed.reduce((s,t)=> s+ (Number(t.amount)||0),0); out.push({ key:'unclaimed', title:`有 ${unclaimed.length} 筆未請款（$${sumUn.toFixed(0)}），要安排處理嗎？`, cta:'查看未請款', kind:'unclaimed' }); }
+    // Nudge 3: Implementation intention / habit
+    if(topWord){ out.push({ key:'habit', title:`下次遇到「${topWord}」時，先檢查是否必要（小步行動）`, cta:'我知道了', kind:'ack' }); }
+    // Nudge 4: Savings goal
+    if(!Number(settings.savingsGoalTWD||0) && income>0){ out.push({ key:'savings_goal', title:'設定儲蓄目標，提升達成率（目標梯度效應）', cta:'設定目標', kind:'settings' }); }
+    return out.slice(0,3);
+  }catch{ return []; }
+}
+
 function newActionId(){
   try{ return crypto.randomBytes(10).toString('hex'); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2,10); }
 }
@@ -3115,6 +3149,15 @@ const server = http.createServer(async (req, res) => {
     console.error(err);
     res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ ok: false, error: 'server_error' }));
+  }
+
+  // Nudges API
+  if (req.method === 'GET' && reqPath === '/api/nudges/next'){
+    const user = REQUIRE_AUTH ? getUserFromRequest(req) : null;
+    const userId = REQUIRE_AUTH ? (user?.id || user?.userId || null) : null;
+    const list = await computeNudges(userId);
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok:true, nudges:list }));
   }
 
 });

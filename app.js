@@ -1309,9 +1309,10 @@
   async function computeInsights(){
     const list = $('#insightsList');
     if(!list) return;
-    const [settings, txs] = await Promise.all([
+    const [settings, txs, nudgesResp] = await Promise.all([
       DB.getSettings?.(),
-      DB.getTransactions()
+      DB.getTransactions(),
+      fetch('/api/nudges/next').then(r=> r.ok ? r.json() : { ok:false }).catch(()=>({ ok:false }))
     ]);
     const now = new Date();
     const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
@@ -1358,7 +1359,21 @@
     }
     if(unclaimed.length>0) items.push(`有 ${unclaimed.length} 筆未請款，記得報帳`);
     if(streak>=3) items.push(`已連續 ${streak} 天有紀錄，太棒了！`);
-    list.innerHTML = items.map(x=>`<li>${x}</li>`).join('') || '<li>目前沒有特別提醒</li>';
+    const nudges = Array.isArray(nudgesResp?.nudges) ? nudgesResp.nudges : [];
+    const nudgeItems = nudges.map(n=>`<li><strong>${n.title}</strong> ${n.cta?`<button class=\"secondary\" data-kind=\"${n.kind||''}\">${n.cta}</button>`:''}</li>`).join('');
+    list.innerHTML = (items.map(x=>`<li>${x}</li>`).join('') || '') + nudgeItems || '<li>目前沒有特別提醒</li>';
+    // bind nudge actions
+    list.querySelectorAll('button[data-kind]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const kind = btn.dataset.kind;
+        if(kind==='settings'){ document.getElementById('settingsBtn')?.click(); }
+        if(kind==='unclaimed'){
+          const tab = document.querySelector('.tab-btn[data-tab-target="stats"]'); tab?.click();
+          const sel = document.getElementById('statsMode'); if(sel){ sel.value='unclaimed'; sel.dispatchEvent(new Event('change')); }
+        }
+        if(kind==='ack'){ btn.disabled=true; btn.textContent='已了解'; }
+      });
+    });
   }
 
   function groupByMonth(items){
