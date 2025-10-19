@@ -3,12 +3,8 @@
   const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
   const ADMIN_LINE_USER_ID = 'U5c7738d89a59ff402fd6b56f5472d351';
 
-  // Resolve API base URL for AI endpoints
+  // Resolve API base URL for AI endpoints（優先使用設定的伺服器 URL，其次才用同源）
   function apiBase(preferred){
-    try{
-      const origin = (typeof location!=='undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
-      if(origin) return origin.replace(/\/$/,'');
-    }catch(_){ }
     try{
       const cand = String(preferred||'').trim();
       if(/^https?:\/\//.test(cand)) return cand.replace(/\/$/,'');
@@ -16,6 +12,10 @@
     try{
       const saved = (localStorage.getItem('serverUrl')||'').trim();
       if(/^https?:\/\//.test(saved)) return saved.replace(/\/$/,'');
+    }catch(_){ }
+    try{
+      const origin = (typeof location!=='undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
+      if(origin) return origin.replace(/\/$/,'');
     }catch(_){ }
     // Sensible default for local dev
     return 'http://localhost:8787';
