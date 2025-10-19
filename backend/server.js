@@ -35,6 +35,8 @@ const LINE_LOGIN_CHANNEL_ID = process.env.LINE_LOGIN_CHANNEL_ID || '';
 const LINE_LOGIN_CHANNEL_SECRET = process.env.LINE_LOGIN_CHANNEL_SECRET || '';
 const LINE_LOGIN_REDIRECT_URI = process.env.LINE_LOGIN_REDIRECT_URI || '';
 const ADMIN_LINE_USER_ID = process.env.ADMIN_LINE_USER_ID || 'U5c7738d89a59ff402fd6b56f5472d351';
+// Allow anonymous access for AI endpoints even if REQUIRE_AUTH=true
+const AI_ALLOW_ANON = String(process.env.AI_ALLOW_ANON||'false').toLowerCase()==='true';
 // Local model trainer scheduling
 const MODEL_TRAIN_INTERVAL_MS = Number(process.env.MODEL_TRAIN_INTERVAL_MS || 300000); // default 5 min
 const MODEL_TRAIN_ON_START = String(process.env.MODEL_TRAIN_ON_START||'true').toLowerCase()==='true';
@@ -1447,7 +1449,10 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok:true }));
     }
     if (req.method === 'POST' && reqPath === '/api/ai') {
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); } }
+      if(REQUIRE_AUTH && !AI_ALLOW_ANON){
+        const user = getUserFromRequest(req);
+        if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); }
+      }
       const raw = await parseBody(req);
       const body = JSON.parse(raw.toString('utf-8') || '{}');
       const { messages = [], context = {}, mode = 'chat' } = body || {};
@@ -1509,7 +1514,10 @@ const server = http.createServer(async (req, res) => {
 
     // AI streaming (SSE)
     if (req.method === 'POST' && reqPath === '/api/ai/stream') {
-      if(REQUIRE_AUTH){ const user = getUserFromRequest(req); if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); } }
+      if(REQUIRE_AUTH && !AI_ALLOW_ANON){
+        const user = getUserFromRequest(req);
+        if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); }
+      }
       const raw = await parseBody(req);
       const body = JSON.parse(raw.toString('utf-8') || '{}');
       const { messages = [], context = {} } = body || {};
