@@ -3180,7 +3180,19 @@ const server = http.createServer(async (req, res) => {
   if(reqPath==='/api/notes' && req.method==='POST'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getNotes(uid); const rec = { id:safeId(), title:String(body.title||'').slice(0,80), content:String(body.content||'').slice(0,2000), tags:Array.isArray(body.tags)?body.tags.slice(0,10):[], pinned:!!body.pinned, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    const rows = getNotes(uid);
+    const rec = {
+      id: safeId(),
+      title: String(body.title||'').slice(0,120),
+      content: String(body.content||'').slice(0,4000),
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : [],
+      pinned: !!body.pinned,
+      color: String(body.color||'').slice(0,16), // 'red','blue','green','yellow','purple'...
+      emoji: String(body.emoji||'').slice(0,4),
+      archived: !!body.archived,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
     rows.unshift(rec); setNotes(uid, rows);
     res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
   }
@@ -3188,7 +3200,17 @@ const server = http.createServer(async (req, res) => {
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const rows = getNotes(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-    const next = { ...rows[idx], ...body, title:String(body.title??rows[idx].title).slice(0,80), content:String(body.content??rows[idx].content).slice(0,2000), updatedAt:new Date().toISOString() };
+    const next = {
+      ...rows[idx],
+      ...body,
+      title: String((body.title??rows[idx].title)||'').slice(0,120),
+      content: String((body.content??rows[idx].content)||'').slice(0,4000),
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : (rows[idx].tags||[]),
+      color: String((body.color??rows[idx].color)||'').slice(0,16),
+      emoji: String((body.emoji??rows[idx].emoji)||'').slice(0,4),
+      archived: typeof body.archived==='boolean' ? body.archived : !!rows[idx].archived,
+      updatedAt: new Date().toISOString()
+    };
     rows[idx]=next; setNotes(uid, rows);
     res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
   }
@@ -3207,7 +3229,21 @@ const server = http.createServer(async (req, res) => {
   if(reqPath==='/api/reminders' && req.method==='POST'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getReminders(uid); const rec = { id:safeId(), title:String(body.title||'').slice(0,120), dueAt: String(body.dueAt||''), repeat: String(body.repeat||''), done: !!body.done, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    const rows = getReminders(uid);
+    const rec = {
+      id: safeId(),
+      title: String(body.title||'').slice(0,160),
+      dueAt: String(body.dueAt||''),
+      repeat: String(body.repeat||'none'), // none|daily|weekly|monthly
+      weekdays: Array.isArray(body.weekdays) ? body.weekdays.map(n=> Number(n)|0).filter(n=> n>=0 && n<=6).slice(0,7) : [],
+      monthDay: Number.isFinite(Number(body.monthDay)) ? Math.max(1, Math.min(31, Number(body.monthDay))) : undefined,
+      priority: ['low','medium','high'].includes(String(body.priority)) ? String(body.priority) : 'medium',
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : [],
+      note: String(body.note||'').slice(0,1000),
+      done: !!body.done,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
     rows.unshift(rec); setReminders(uid, rows);
     res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:rec }));
   }
@@ -3215,7 +3251,18 @@ const server = http.createServer(async (req, res) => {
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const rows = getReminders(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-    const next = { ...rows[idx], ...body, title:String(body.title??rows[idx].title).slice(0,120), updatedAt:new Date().toISOString() };
+    const next = {
+      ...rows[idx],
+      ...body,
+      title: String((body.title??rows[idx].title)||'').slice(0,160),
+      repeat: String((body.repeat??rows[idx].repeat)||'none'),
+      weekdays: Array.isArray(body.weekdays) ? body.weekdays.map(n=> Number(n)|0).filter(n=> n>=0 && n<=6).slice(0,7) : (rows[idx].weekdays||[]),
+      monthDay: Number.isFinite(Number(body.monthDay)) ? Math.max(1, Math.min(31, Number(body.monthDay))) : (rows[idx].monthDay),
+      priority: ['low','medium','high'].includes(String(body.priority)) ? String(body.priority) : (rows[idx].priority||'medium'),
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : (rows[idx].tags||[]),
+      note: String((body.note??rows[idx].note)||'').slice(0,1000),
+      updatedAt: new Date().toISOString()
+    };
     rows[idx]=next; setReminders(uid, rows);
     res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:next }));
   }

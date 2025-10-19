@@ -210,10 +210,15 @@
       const rows = await fetchNotes();
       const filtered = q ? rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)) : rows;
       list.innerHTML = filtered.map(n=> `<li class="tx-item" data-id="${n.id}">
-        <div><div><strong>${(n.title||'(無標題)').replace(/[<>&]/g,'')}</strong>${n.pinned? ' <span class="badge">釘選</span>':''}</div>
-        <small>${new Date(n.updatedAt||n.createdAt).toLocaleString()}</small><div>${(n.content||'').replace(/[<>&]/g,'')}</div></div>
+        <div>
+          <div><strong>${(n.emoji? n.emoji+' ':'')}${(n.title||'(無標題)').replace(/[<>&]/g,'')}</strong>${n.pinned? ' <span class="badge">釘選</span>':''}${n.archived? ' <span class="badge">封存</span>':''}</div>
+          <small>${new Date(n.updatedAt||n.createdAt).toLocaleString()}${(n.tags&&n.tags.length)? ' ｜ '+n.tags.map(t=>`#${t}`).join(' ') : ''}</small>
+          <div>${(n.content||'').replace(/[<>&]/g,'')}</div>
+        </div>
         <div class="tx-actions">
           <button class="ghost" data-action="pin">${n.pinned?'取消釘選':'釘選'}</button>
+          <button class="ghost" data-action="archive">${n.archived?'取消封存':'封存'}</button>
+          <button class="ghost" data-action="tag">標籤</button>
           <button class="ghost" data-action="edit">編輯</button>
           <button class="ghost danger" data-action="delete">刪除</button>
         </div>
@@ -222,8 +227,12 @@
     $('#addNoteBtn')?.addEventListener('click', async ()=>{
       const title = $('#noteTitleInput')?.value||'';
       const content = $('#noteContentInput')?.value||'';
+      const tags = ($('#noteTagsInput')?.value||'').split(/\s+/).filter(Boolean).slice(0,20);
+      const emoji = $('#noteEmojiInput')?.value||'';
+      const color = $('#noteColorInput')?.value||'';
+      const pinned = !!($('#notePinToggle')?.checked);
       if(!content.trim()){ alert('請輸入內容'); return; }
-      await fetch('/api/notes',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, content }) });
+      await fetch('/api/notes',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, content, tags, emoji, color, pinned }) });
       $('#noteContentInput').value=''; renderNotes();
     });
     $('#noteSearchInput')?.addEventListener('input', renderNotes);
@@ -236,6 +245,15 @@
       if(btn.dataset.action==='pin'){
         const pinned = btn.textContent.includes('取消') ? false : true;
         await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pinned }) }); renderNotes(); return;
+      }
+      if(btn.dataset.action==='archive'){
+        const archived = btn.textContent.includes('取消') ? false : true;
+        await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ archived }) }); renderNotes(); return;
+      }
+      if(btn.dataset.action==='tag'){
+        const s = prompt('新增或編輯標籤（以空白分隔）', '');
+        if(s!==null){ const tags = s.split(/\s+/).filter(Boolean).slice(0,20); await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tags }) }); renderNotes(); }
+        return;
       }
       if(btn.dataset.action==='edit'){
         const title = prompt('編輯標題', li.querySelector('strong')?.textContent||'')||'';
@@ -250,9 +268,14 @@
       const list = $('#remindersList'); if(!list) return;
       const rows = await fetchReminders();
       list.innerHTML = rows.map(r=> `<li class="tx-item" data-id="${r.id}">
-        <div><div>${(r.title||'').replace(/[<>&]/g,'')}</div><small>${r.dueAt ? new Date(r.dueAt).toLocaleString() : '無期限'}</small></div>
+        <div>
+          <div><strong>${(r.title||'').replace(/[<>&]/g,'')}</strong> ${r.priority?`<span class=\"badge\">${r.priority}</span>`:''}</div>
+          <small>${r.dueAt ? new Date(r.dueAt).toLocaleString() : '無期限'}${(r.tags&&r.tags.length)? ' ｜ '+r.tags.map(t=>`#${t}`).join(' ') : ''}</small>
+          ${r.note?`<div>${r.note.replace(/[<>&]/g,'')}</div>`:''}
+        </div>
         <div class="tx-actions">
           <button class="ghost" data-action="done">${r.done?'標記未完成':'標記完成'}</button>
+          <button class="ghost" data-action="edit">編輯</button>
           <button class="ghost" data-action="snooze">延後 1 小時</button>
           <button class="ghost danger" data-action="delete">刪除</button>
         </div>
@@ -260,8 +283,14 @@
     }
     $('#addReminderBtn')?.addEventListener('click', async ()=>{
       const title = $('#reminderTitleInput')?.value||''; const dueAt = $('#reminderDueInput')?.value||'';
+      const repeat = $('#reminderRepeat')?.value||'none';
+      const monthDay = Number($('#reminderMonthDay')?.value)||undefined;
+      const priority = $('#reminderPriority')?.value||'medium';
+      const tags = ($('#reminderTagsInput')?.value||'').split(/\s+/).filter(Boolean).slice(0,20);
+      const note = $('#reminderNoteInput')?.value||'';
+      const weekdays = Array.from(document.querySelectorAll('.reminderWeek:checked')).map(el=> Number(el.value)|0);
       if(!title.trim()){ alert('請輸入提醒內容'); return; }
-      await fetch('/api/reminders',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, dueAt }) });
+      await fetch('/api/reminders',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, dueAt, repeat, monthDay, priority, tags, note, weekdays }) });
       $('#reminderTitleInput').value=''; renderReminders();
     });
     $('#remindersList')?.addEventListener('click', async (e)=>{
@@ -278,6 +307,13 @@
         const all = await fetchReminders(); const rec = all.find(x=>x.id===id); if(!rec){ return; }
         const base = rec.dueAt ? new Date(rec.dueAt) : new Date(); base.setHours(base.getHours()+1);
         await fetch(`/api/reminders/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ dueAt: base.toISOString() }) }); renderReminders(); return;
+      }
+      if(btn.dataset.action==='edit'){
+        const all = await fetchReminders(); const rec = all.find(x=>x.id===id); if(!rec) return;
+        const title = prompt('提醒內容', rec.title)||rec.title;
+        const note = prompt('備註', rec.note||'')||rec.note||'';
+        const priority = prompt('優先（low/medium/high）', rec.priority||'medium')||rec.priority||'medium';
+        await fetch(`/api/reminders/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, note, priority }) }); renderReminders(); return;
       }
     });
     // AI Responses panel bindings
@@ -1440,6 +1476,19 @@
     const nudges = Array.isArray(nudgesResp?.nudges) ? nudgesResp.nudges : [];
     const nudgeItems = nudges.map(n=>`<li><strong>${n.title}</strong> ${n.cta?`<button class=\"secondary\" data-kind=\"${n.kind||''}\">${n.cta}</button>`:''}</li>`).join('');
     list.innerHTML = (items.map(x=>`<li>${x}</li>`).join('') || '') + nudgeItems || '<li>目前沒有特別提醒</li>';
+    // top psychology banner (first nudge)
+    try{
+      const banner = document.getElementById('psyBanner');
+      if(banner){
+        const first = nudges[0];
+        if(first){
+          banner.style.display = '';
+          banner.querySelector('.notice__content').textContent = first.title;
+        }else{
+          banner.style.display = 'none';
+        }
+      }
+    }catch(_){ }
     // bind nudge actions
     list.querySelectorAll('button[data-kind]').forEach(btn=>{
       btn.addEventListener('click', ()=>{
