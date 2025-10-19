@@ -2866,6 +2866,113 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok:true }));
     }
 
+    // Agents triage demo endpoint
+    if (req.method === 'POST' && reqPath === '/api/ai/agents/triage'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiAgentsTriage(input);
+      res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (text)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/text'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesText(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (vision)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/vision'){
+      const raw = await parseBody(req);
+      const { text='', imageUrl='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesVision(text, imageUrl);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(text||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (web_search)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/web_search'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesWebSearch(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (file_search)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/file_search'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesFileSearch(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (function tool)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/function_tool'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesFunctionTool(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (MCP)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/mcp'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesMcp(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
+    // OpenAI Responses API (stream aggregated)
+    if (req.method === 'POST' && reqPath === '/api/ai/responses/stream'){
+      const raw = await parseBody(req);
+      const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
+      const r = await aiResponsesStreamOnce(input);
+      if(!r.ok){
+        const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+        res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:true, output:String(fb||'') }));
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
+    }
+
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ ok: false, error: 'not_found', path: reqPath, method: req.method }));
   } catch (err) {
@@ -2874,77 +2981,6 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: false, error: 'server_error' }));
   }
 
-  // Agents triage demo endpoint
-  if (req.method === 'POST' && reqPath === '/api/ai/agents/triage'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiAgentsTriage(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (text)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/text'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesText(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (vision)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/vision'){
-    const raw = await parseBody(req);
-    const { text='', imageUrl='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesVision(text, imageUrl);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (web_search)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/web_search'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesWebSearch(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (file_search)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/file_search'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesFileSearch(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (function tool)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/function_tool'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesFunctionTool(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (MCP)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/mcp'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesMcp(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
-
-  // OpenAI Responses API (stream aggregated)
-  if (req.method === 'POST' && reqPath === '/api/ai/responses/stream'){
-    const raw = await parseBody(req);
-    const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const r = await aiResponsesStreamOnce(input);
-    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(r));
-  }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -2996,4 +3032,3 @@ function fetchJson(url, opts, timeoutMs=15000){
     req.end();
   });
 }
-

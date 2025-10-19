@@ -3,6 +3,24 @@
   const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
   const ADMIN_LINE_USER_ID = 'U5c7738d89a59ff402fd6b56f5472d351';
 
+  // Resolve API base URL for AI endpoints
+  function apiBase(preferred){
+    try{
+      const origin = (typeof location!=='undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
+      if(origin) return origin.replace(/\/$/,'');
+    }catch(_){ }
+    try{
+      const cand = String(preferred||'').trim();
+      if(/^https?:\/\//.test(cand)) return cand.replace(/\/$/,'');
+    }catch(_){ }
+    try{
+      const saved = (localStorage.getItem('serverUrl')||'').trim();
+      if(/^https?:\/\//.test(saved)) return saved.replace(/\/$/,'');
+    }catch(_){ }
+    // Sensible default for local dev
+    return 'http://localhost:8787';
+  }
+
   function showDialogSafe(dialog){
     if(!dialog) return;
     try{ dialog.showModal?.(); return; }catch(_){ }
@@ -187,9 +205,7 @@
     // AI Responses panel bindings
     async function callResponsesApi(path, body){
       try{
-        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
-        const base = (originOk || '').replace(/\/$/,'');
-        if(!base){ throw new Error('no base url'); }
+        const base = apiBase();
         const resp = await fetch(`${base}${path}`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body||{}) });
         const j = await resp.json().catch(()=>({ ok:false }));
         if(!resp.ok || !j.ok){ throw new Error('upstream'); }
@@ -411,8 +427,7 @@
       // Try AI analysis
       let aiText = '';
       try{
-        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
-        const base = (originOk || '').replace(/\/$/,'');
+        const base = apiBase();
         if(base){
           const resp = await fetch(`${base}/api/ai`,{
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -1089,9 +1104,8 @@
       try{
         const s = await DB.getSettings?.();
         const candidate = ($('#serverUrl')?.value || s?.serverUrl || '').trim();
-        const originOk = (typeof location !== 'undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
-        // Prefer same-origin if available; fall back to candidate (user-configured)
-        const base = (originOk || candidate).replace(/\/$/,'');
+        // Prefer same-origin; then user-configured; then localhost default
+        const base = apiBase(candidate);
         aiAbort = new AbortController();
         // Multi-line batch mode（以多種換行/分隔符判斷）
         const parts = String(text).split(/\r\n|\n|\r|[;；]/).map(s=>s.trim()).filter(Boolean);
@@ -1563,4 +1577,3 @@
 
   document.addEventListener('DOMContentLoaded', main);
 })();
-
