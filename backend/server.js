@@ -143,6 +143,15 @@ const fileStore = {
   importAll(userId, data){ if(!data||!Array.isArray(data.categories)||!Array.isArray(data.transactions)) return false; const dir=userDirFor(userId); writeJson(path.join(dir,'categories.json'), data.categories); writeJson(path.join(dir,'transactions.json'), data.transactions); if(data.settings){ writeJson(path.join(dir,'settings.json'), { key:'app', ...data.settings }); } if(Array.isArray(data.model)){ writeJson(path.join(dir,'model.json'), data.model); } return true; }
 };
 
+// Notes & Reminders (file-based)
+function safeId(){ try{ return crypto.randomUUID(); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2); } }
+function notesPath(userId){ return path.join(userDirFor(userId), 'notes.json'); }
+function remindersPath(userId){ return path.join(userDirFor(userId), 'reminders.json'); }
+function getNotes(userId){ return readJson(notesPath(userId), []); }
+function setNotes(userId, arr){ return writeJson(notesPath(userId), arr); }
+function getReminders(userId){ return readJson(remindersPath(userId), []); }
+function setReminders(userId, arr){ return writeJson(remindersPath(userId), arr); }
+
 // File-based link store for mapping LINE bot user <-> web login user when DATABASE_URL is not set
 const SHARED_DATA_DIR = path.resolve(DATA_BASE, '..'); // e.g. data/
 function sharedPath(name){ ensureDir(SHARED_DATA_DIR); return path.join(SHARED_DATA_DIR, name); }
@@ -3161,6 +3170,60 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(r));
     }
+
+  // Notes CRUD
+  if(reqPath==='/api/notes' && req.method==='GET'){
+    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(getNotes(uid)));
+  }
+  if(reqPath==='/api/notes' && req.method==='POST'){
+    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
+    const rows = getNotes(uid); const rec = { id:safeId(), title:String(body.title||'').slice(0,80), content:String(body.content||'').slice(0,2000), tags:Array.isArray(body.tags)?body.tags.slice(0,10):[], pinned:!!body.pinned, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    rows.unshift(rec); setNotes(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
+  }
+  if(/^\/api\/notes\//.test(reqPath) && req.method==='PUT'){
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
+    const rows = getNotes(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+    const next = { ...rows[idx], ...body, title:String(body.title??rows[idx].title).slice(0,80), content:String(body.content??rows[idx].content).slice(0,2000), updatedAt:new Date().toISOString() };
+    rows[idx]=next; setNotes(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
+  }
+  if(/^\/api\/notes\//.test(reqPath) && req.method==='DELETE'){
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const rows = getNotes(uid).filter(n=>n.id!==id); setNotes(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+  }
+
+  // Reminders CRUD
+  if(reqPath==='/api/reminders' && req.method==='GET'){
+    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(getReminders(uid)));
+  }
+  if(reqPath==='/api/reminders' && req.method==='POST'){
+    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
+    const rows = getReminders(uid); const rec = { id:safeId(), title:String(body.title||'').slice(0,120), dueAt: String(body.dueAt||''), repeat: String(body.repeat||''), done: !!body.done, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    rows.unshift(rec); setReminders(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:rec }));
+  }
+  if(/^\/api\/reminders\//.test(reqPath) && req.method==='PUT'){
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
+    const rows = getReminders(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+    const next = { ...rows[idx], ...body, title:String(body.title??rows[idx].title).slice(0,120), updatedAt:new Date().toISOString() };
+    rows[idx]=next; setReminders(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:next }));
+  }
+  if(/^\/api\/reminders\//.test(reqPath) && req.method==='DELETE'){
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const rows = getReminders(uid).filter(n=>n.id!==id); setReminders(uid, rows);
+    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+  }
 
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ ok: false, error: 'not_found', path: reqPath, method: req.method }));
