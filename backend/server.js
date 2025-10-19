@@ -521,7 +521,6 @@ function menuFlexBubble({ baseUrl='' }){
 
 // Simple in-memory guided add flow state
 const guidedFlow = new Map(); // userId -> { step, payload }
-const aiFeatureFlow = new Map(); // userId -> { kind, step }
 
 // AI contextual intent support (in-memory, single instance)
 const aiPending = new Map(); // actionId -> { userId, kind: 'add_tx'|'delete_tx', payload?, txId? }
@@ -1939,41 +1938,6 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
-            // Feature flow handlers (demo for OpenAI Responses capability fallbacks)
-            if(flow==='feature'){
-              const step = String(dataObj.step||'');
-              if(step==='responses_text'){
-                const text = '生成一段關於彩虹獨角獸的一句短篇故事。';
-                const reply = await aiChatText(text, { demo:true });
-                await lineReply(replyToken, [{ type:'text', text: reply.slice(0,1000) }]);
-                continue;
-              }
-              if(step==='vision'){
-                const info = '圖片理解示範：目前未上傳圖片，請直接貼圖片網址與問題，我會嘗試描述內容。';
-                await lineReply(replyToken, [{ type:'text', text: info }]);
-                continue;
-              }
-              if(step==='web_search'){
-                const info = '網頁搜尋示範：目前未接上外部搜尋服務。你可以先告訴我關鍵字，我用一般對話先提供方向。';
-                await lineReply(replyToken, [{ type:'text', text: info }]);
-                continue;
-              }
-              if(step==='file_search'){
-                const info = '文件搜尋示範：目前未接上向量資料庫。你可先上傳文字檔並詢問重點，我用一般對話回覆摘要。';
-                await lineReply(replyToken, [{ type:'text', text: info }]);
-                continue;
-              }
-              if(step==='function_tools'){
-                const info = '函式工具示範：你可以說「查台北天氣」，我會嘗試以內建邏輯回覆（暫無外部 API）。';
-                await lineReply(replyToken, [{ type:'text', text: info }]);
-                continue;
-              }
-              if(step==='stream'){
-                const info = '串流示範：目前 LINE 不支援逐字串流顯示，我會在後端完整生成後一次回覆。';
-                await lineReply(replyToken, [{ type:'text', text: info }]);
-                continue;
-              }
-            }
             // Admin actions
             if(flow==='admin'){
               const replyToken = ev.replyToken;
@@ -2292,20 +2256,6 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
-            // Feature menu trigger
-            if(/^功能$|^選單$|^menu$/i.test(text)){
-              const buttons = [
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'文字生成', data:'flow=feature&step=responses_text' } },
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'圖片理解', data:'flow=feature&step=vision' } },
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'網頁搜尋', data:'flow=feature&step=web_search' } },
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'文件搜尋', data:'flow=feature&step=file_search' } },
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'函式工具', data:'flow=feature&step=function_tools' } },
-                { style:'secondary', color:'#64748b', action:{ type:'postback', label:'串流示範', data:'flow=feature&step=stream' } }
-              ];
-              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||'', title:'AI 功能選單', subtitle:'選擇一項示範', lines:[], buttons, showHero:false, compact:true });
-              await lineReply(replyToken, [{ type:'flex', altText:'功能選單', contents:bubble }]);
-              continue;
-            }
             // Admin: open menu or broadcast input handler
             if(isLineAdmin(lineUidRaw)){
               if(/^管理$|^admin$/i.test(text)){
