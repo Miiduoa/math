@@ -1669,10 +1669,19 @@
     const indicator = document.getElementById('tabIndicator');
     function moveIndicator(name){
       if(!indicator) return;
-      const idx = ['ledger','stats','calendar','assistant'].indexOf(name);
+      const order = ['ledger','stats','calendar','assistant'];
+      const idx = order.indexOf(name);
       if(idx<0) return;
-      const percent = idx * 25; // 預設四個分頁
-      indicator.style.transform = `translateX(calc(${percent}% + ${idx*2}px))`;
+      const btns = Array.from(document.querySelectorAll('.tabs.bottom .tab-btn'));
+      if(btns.length!==order.length) return;
+      const target = btns[idx];
+      const wrap = target.parentElement;
+      const wrapRect = wrap.getBoundingClientRect();
+      const rect = target.getBoundingClientRect();
+      const x = rect.left - wrapRect.left + 4; // 與 CSS top/bottom:4px 對齊
+      const w = rect.width - 8; // top/bottom:4px 後的寬度
+      indicator.style.width = `${w}px`;
+      indicator.style.transform = `translateX(${Math.max(0,x)}px)`;
     }
     tabs.forEach(btn=> btn.addEventListener('click', ()=>{
       // haptic-like micro interaction on mobile
