@@ -1747,7 +1747,7 @@
     const indicator = document.getElementById('tabIndicator');
     function moveIndicator(name){
       if(!indicator) return;
-      const order = ['ledger','stats','calendar','assistant'];
+      const order = ['ledger','stats','calendar','assistant','notes','reminders'];
       const idx = order.indexOf(name);
       if(idx<0) return;
       const btns = Array.from(document.querySelectorAll('.tabs.bottom .tab-btn'));
