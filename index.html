@@ -194,6 +194,10 @@
 
     <section class="card" data-tab="assistant">
       <h2>AI 助理與洞察</h2>
+      <div class="inline" style="margin-bottom:8px">
+        <button id="goNotesBtn" class="secondary">前往記事本</button>
+        <button id="goRemindersBtn" class="secondary">前往提醒事項</button>
+      </div>
       <div class="assistant">
         <div class="inline">
           <input id="nlpInput" type="text" placeholder="例如：支出 120 餐飲 早餐 2025-10-12 USD 匯率 32 已請款">
@@ -209,6 +213,29 @@
           <span class="label">洞察</span>
           <ul id="insightsList" class="insights"></ul>
         </div>
+      </div>
+      <hr style="margin:12px 0; opacity:.2">
+      <div class="assistant" id="notesPanel">
+        <h3>記事本</h3>
+        <div class="inline">
+          <input id="noteTitleInput" type="text" placeholder="標題（選填）" style="flex:1">
+          <input id="noteSearchInput" type="search" placeholder="搜尋..." style="flex:1">
+        </div>
+        <div class="inline" style="margin-top:6px">
+          <textarea id="noteContentInput" rows="2" placeholder="寫點什麼..." style="flex:1"></textarea>
+          <button id="addNoteBtn" class="primary">新增記事</button>
+        </div>
+        <ul id="notesList" class="tx-list" style="margin-top:8px"></ul>
+      </div>
+      <hr style="margin:12px 0; opacity:.2">
+      <div class="assistant" id="remindersPanel">
+        <h3>提醒事項</h3>
+        <div class="inline">
+          <input id="reminderTitleInput" type="text" placeholder="提醒內容" style="flex:1">
+          <input id="reminderDueInput" type="datetime-local" style="min-width:200px">
+          <button id="addReminderBtn" class="primary">新增提醒</button>
+        </div>
+        <ul id="remindersList" class="tx-list" style="margin-top:8px"></ul>
       </div>
       <hr style="margin:12px 0; opacity:.2">
       <div id="adminBroadcast" class="assistant" style="display:none">

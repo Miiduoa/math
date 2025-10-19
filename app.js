@@ -202,6 +202,84 @@
   }
 
   function bindEvents(){
+    // Notes UI
+    async function fetchNotes(){ try{ const r=await fetch('/api/notes'); return await r.json(); }catch(_){ return []; } }
+    async function renderNotes(){
+      const list = $('#notesList'); if(!list) return;
+      const q = ($('#noteSearchInput')?.value||'').trim().toLowerCase();
+      const rows = await fetchNotes();
+      const filtered = q ? rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)) : rows;
+      list.innerHTML = filtered.map(n=> `<li class="tx-item" data-id="${n.id}">
+        <div><div><strong>${(n.title||'(無標題)').replace(/[<>&]/g,'')}</strong>${n.pinned? ' <span class="badge">釘選</span>':''}</div>
+        <small>${new Date(n.updatedAt||n.createdAt).toLocaleString()}</small><div>${(n.content||'').replace(/[<>&]/g,'')}</div></div>
+        <div class="tx-actions">
+          <button class="ghost" data-action="pin">${n.pinned?'取消釘選':'釘選'}</button>
+          <button class="ghost" data-action="edit">編輯</button>
+          <button class="ghost danger" data-action="delete">刪除</button>
+        </div>
+      </li>`).join('');
+    }
+    $('#addNoteBtn')?.addEventListener('click', async ()=>{
+      const title = $('#noteTitleInput')?.value||'';
+      const content = $('#noteContentInput')?.value||'';
+      if(!content.trim()){ alert('請輸入內容'); return; }
+      await fetch('/api/notes',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, content }) });
+      $('#noteContentInput').value=''; renderNotes();
+    });
+    $('#noteSearchInput')?.addEventListener('input', renderNotes);
+    $('#notesList')?.addEventListener('click', async (e)=>{
+      const btn = e.target.closest('button'); if(!btn) return;
+      const li = e.target.closest('li[data-id]'); const id = li?.dataset.id; if(!id) return;
+      if(btn.dataset.action==='delete'){
+        await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'DELETE' }); renderNotes(); return;
+      }
+      if(btn.dataset.action==='pin'){
+        const pinned = btn.textContent.includes('取消') ? false : true;
+        await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pinned }) }); renderNotes(); return;
+      }
+      if(btn.dataset.action==='edit'){
+        const title = prompt('編輯標題', li.querySelector('strong')?.textContent||'')||'';
+        const content = prompt('編輯內容', li.querySelector('div div:last-child')?.textContent||'')||'';
+        await fetch(`/api/notes/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, content }) }); renderNotes(); return;
+      }
+    });
+
+    // Reminders UI
+    async function fetchReminders(){ try{ const r=await fetch('/api/reminders'); return await r.json(); }catch(_){ return []; } }
+    async function renderReminders(){
+      const list = $('#remindersList'); if(!list) return;
+      const rows = await fetchReminders();
+      list.innerHTML = rows.map(r=> `<li class="tx-item" data-id="${r.id}">
+        <div><div>${(r.title||'').replace(/[<>&]/g,'')}</div><small>${r.dueAt ? new Date(r.dueAt).toLocaleString() : '無期限'}</small></div>
+        <div class="tx-actions">
+          <button class="ghost" data-action="done">${r.done?'標記未完成':'標記完成'}</button>
+          <button class="ghost" data-action="snooze">延後 1 小時</button>
+          <button class="ghost danger" data-action="delete">刪除</button>
+        </div>
+      </li>`).join('');
+    }
+    $('#addReminderBtn')?.addEventListener('click', async ()=>{
+      const title = $('#reminderTitleInput')?.value||''; const dueAt = $('#reminderDueInput')?.value||'';
+      if(!title.trim()){ alert('請輸入提醒內容'); return; }
+      await fetch('/api/reminders',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, dueAt }) });
+      $('#reminderTitleInput').value=''; renderReminders();
+    });
+    $('#remindersList')?.addEventListener('click', async (e)=>{
+      const btn = e.target.closest('button'); if(!btn) return;
+      const li = e.target.closest('li[data-id]'); const id = li?.dataset.id; if(!id) return;
+      if(btn.dataset.action==='delete'){
+        await fetch(`/api/reminders/${encodeURIComponent(id)}`,{ method:'DELETE' }); renderReminders(); return;
+      }
+      if(btn.dataset.action==='done'){
+        const done = btn.textContent.includes('未完成') ? false : true;
+        await fetch(`/api/reminders/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ done }) }); renderReminders(); return;
+      }
+      if(btn.dataset.action==='snooze'){
+        const all = await fetchReminders(); const rec = all.find(x=>x.id===id); if(!rec){ return; }
+        const base = rec.dueAt ? new Date(rec.dueAt) : new Date(); base.setHours(base.getHours()+1);
+        await fetch(`/api/reminders/${encodeURIComponent(id)}`,{ method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ dueAt: base.toISOString() }) }); renderReminders(); return;
+      }
+    });
     // AI Responses panel bindings
     async function callResponsesApi(path, body){
       try{
@@ -1692,6 +1770,15 @@
     }));
     showTab('ledger');
     moveIndicator('ledger');
+    // Initial render notes/reminders
+    try{ renderNotes(); renderReminders(); }catch(_){ }
+    // Quick jump
+    $('#goNotesBtn')?.addEventListener('click', ()=>{
+      document.getElementById('notesPanel')?.scrollIntoView({ behavior:'smooth', block:'start' });
+    });
+    $('#goRemindersBtn')?.addEventListener('click', ()=>{
+      document.getElementById('remindersPanel')?.scrollIntoView({ behavior:'smooth', block:'start' });
+    });
     if($('#statsMode')){
       $('#statsMode').addEventListener('change', renderChart);
       renderChart();
