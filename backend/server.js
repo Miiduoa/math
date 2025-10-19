@@ -37,6 +37,14 @@ const LINE_LOGIN_REDIRECT_URI = process.env.LINE_LOGIN_REDIRECT_URI || '';
 const ADMIN_LINE_USER_ID = process.env.ADMIN_LINE_USER_ID || 'U5c7738d89a59ff402fd6b56f5472d351';
 // Allow anonymous access for AI endpoints even if REQUIRE_AUTH=true
 const AI_ALLOW_ANON = String(process.env.AI_ALLOW_ANON||'false').toLowerCase()==='true';
+
+// Runtime toggles (in-memory) for ops without redeploy
+const runtimeToggles = {
+  requireAuth: null,    // null -> use env; boolean overrides
+  aiAllowAnon: null     // null -> use env; boolean overrides
+};
+function isRequireAuth(){ return runtimeToggles.requireAuth===null ? REQUIRE_AUTH : !!runtimeToggles.requireAuth; }
+function isAiAllowAnon(){ return runtimeToggles.aiAllowAnon===null ? AI_ALLOW_ANON : !!runtimeToggles.aiAllowAnon; }
 // Local model trainer scheduling
 const MODEL_TRAIN_INTERVAL_MS = Number(process.env.MODEL_TRAIN_INTERVAL_MS || 300000); // default 5 min
 const MODEL_TRAIN_ON_START = String(process.env.MODEL_TRAIN_ON_START||'true').toLowerCase()==='true';
@@ -528,6 +536,37 @@ const guidedFlow = new Map(); // userId -> { step, payload }
 const aiPending = new Map(); // actionId -> { userId, kind: 'add_tx'|'delete_tx', payload?, txId? }
 const aiLastTxId = new Map(); // userId -> last transaction id added via AI
 const adminState = new Map(); // userId -> { mode: 'broadcast_wait' }
+
+// Recently-seen payload fingerprints to avoid duplicate inserts across channels (LINE/Web)
+const recentTxSeen = new Map(); // userId -> Map<fpr, ts]
+
+function txFingerprint(payload){
+  try{
+    const date = String(payload.date||'').trim();
+    const type = String(payload.type||'').trim();
+    const currency = String(payload.currency||'').trim().toUpperCase();
+    const amount = String(Number(payload.amount)||0);
+    const note = String(payload.note||'').trim().toLowerCase();
+    return `${date}|${type}|${currency}|${amount}|${note}`;
+  }catch{ return ''; }
+}
+
+function seenAndMarkRecent(userId, payload, ttlMs=120000){
+  try{
+    const fpr = txFingerprint(payload);
+    if(!fpr) return false;
+    const now = Date.now();
+    const uid = userId || 'anonymous';
+    let bucket = recentTxSeen.get(uid);
+    if(!bucket){ bucket = new Map(); recentTxSeen.set(uid, bucket); }
+    // prune old
+    for(const [k, ts] of bucket.entries()){ if((now - (ts||0)) > ttlMs) bucket.delete(k); }
+    const prev = bucket.get(fpr)||0;
+    if(prev && (now - prev) < ttlMs){ return true; }
+    bucket.set(fpr, now);
+    return false;
+  }catch{ return false; }
+}
 
 function newActionId(){
   try{ return crypto.randomBytes(10).toString('hex'); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2,10); }
@@ -1449,7 +1488,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok:true }));
     }
     if (req.method === 'POST' && reqPath === '/api/ai') {
-      if(REQUIRE_AUTH && !AI_ALLOW_ANON){
+      if(isRequireAuth() && !isAiAllowAnon()){
         const user = getUserFromRequest(req);
         if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); }
       }
@@ -1514,7 +1553,7 @@ const server = http.createServer(async (req, res) => {
 
     // AI streaming (SSE)
     if (req.method === 'POST' && reqPath === '/api/ai/stream') {
-      if(REQUIRE_AUTH && !AI_ALLOW_ANON){
+      if(isRequireAuth() && !isAiAllowAnon()){
         const user = getUserFromRequest(req);
         if(!user){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'unauthorized' })); }
       }
@@ -1700,6 +1739,89 @@ const server = http.createServer(async (req, res) => {
       const admin = Boolean(isAdminByLine || hasKey);
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok:true, admin }));
+    }
+
+    // Admin: view effective config/toggles
+    if (req.method === 'GET' && reqPath === '/api/admin/config'){
+      const ADMIN_KEY = process.env.ADMIN_KEY || '';
+      const isAdminByKey = ADMIN_KEY && (String(req.headers['x-admin-key']||'')===ADMIN_KEY);
+      let isAdminByLine = false;
+      try{
+        const cookies = parseCookies(req);
+        const sid = verifySigned(cookies['session']||'');
+        if(sid){
+          const s = sessions.get(sid);
+          const uid = s?.user?.id||'';
+          if(uid && uid.startsWith('line:')){
+            const raw = uid.slice('line:'.length);
+            isAdminByLine = (raw===ADMIN_LINE_USER_ID);
+          }
+        }
+      }catch(_){ }
+      if(!(isAdminByKey || isAdminByLine)){
+        res.writeHead(403, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'forbidden' }));
+      }
+      const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
+      const out = {
+        ok:true,
+        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1' },
+        runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
+        effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() }
+      };
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(out));
+    }
+
+    // Admin: update toggles (in-memory) and optional OpenAI config
+    if (req.method === 'POST' && reqPath === '/api/admin/toggles'){
+      const ADMIN_KEY = process.env.ADMIN_KEY || '';
+      const isAdminByKey = ADMIN_KEY && (String(req.headers['x-admin-key']||'')===ADMIN_KEY);
+      let isAdminByLine = false;
+      try{
+        const cookies = parseCookies(req);
+        const sid = verifySigned(cookies['session']||'');
+        if(sid){
+          const s = sessions.get(sid);
+          const uid = s?.user?.id||'';
+          if(uid && uid.startsWith('line:')){
+            const raw = uid.slice('line:'.length);
+            isAdminByLine = (raw===ADMIN_LINE_USER_ID);
+          }
+        }
+      }catch(_){ }
+      if(!(isAdminByKey || isAdminByLine)){
+        res.writeHead(403, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'forbidden' }));
+      }
+      const raw = await parseBody(req);
+      let body={};
+      try{ body = JSON.parse(raw.toString('utf-8')||'{}'); }catch(_){ body={}; }
+      if(typeof body.requireAuth==='boolean') runtimeToggles.requireAuth = !!body.requireAuth;
+      if(typeof body.aiAllowAnon==='boolean') runtimeToggles.aiAllowAnon = !!body.aiAllowAnon;
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiApiKey')){
+        const v = body.openaiApiKey;
+        process.env.OPENAI_API_KEY = (v==null) ? '' : String(v);
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiBaseUrl')){
+        const v = body.openaiBaseUrl;
+        process.env.OPENAI_BASE_URL = (v==null) ? '' : String(v);
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiModel')){
+        const v = body.openaiModel;
+        process.env.OPENAI_MODEL = (v==null) ? '' : String(v);
+      }
+      const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
+      const out = {
+        ok:true,
+        runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
+        effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
+        hasOpenAIKey,
+        openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini',
+        openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1'
+      };
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(out));
     }
 
     // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
@@ -2710,8 +2832,10 @@ const server = http.createServer(async (req, res) => {
                     try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
                   }
                   try{
+                    const uid2 = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                    if(seenAndMarkRecent(uid2, payload)) { skipped++; continue; }
                     if(isDbEnabled()) await pgdb.addTransaction(userId, payload);
-                    else { const uid2 = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous'); fileStore.addTransaction(uid2, payload); }
+                    else { fileStore.addTransaction(uid2, payload); }
                     success++;
                     if(payload.date) lastDate = payload.date;
                     try{ if(payload.note && payload.categoryId){ await trainModelFor(userId||'anonymous', payload.note, payload.categoryId); } }catch(_){ }
@@ -2826,11 +2950,15 @@ const server = http.createServer(async (req, res) => {
               if(!payload.categoryId){
                 try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')); payload.categoryId = cats[0]?.id || 'food'; }catch(_){ payload.categoryId='food'; }
               }
-              if(isDbEnabled()){
-                await pgdb.addTransaction(userId, payload);
-              } else {
-                const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
-                try{ fileStore.addTransaction(uid, payload); }catch(_){ }
+              {
+                const uid3 = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                if(!seenAndMarkRecent(uid3, payload)){
+                  if(isDbEnabled()){
+                    await pgdb.addTransaction(userId, payload);
+                  } else {
+                    try{ fileStore.addTransaction(uid3, payload); }catch(_){ }
+                  }
+                }
               }
               // train local model with note → category
               try{ if(payload.note && payload.categoryId){ await trainModelFor(userId||'anonymous', payload.note, payload.categoryId); } }catch(_){ }
