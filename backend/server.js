@@ -1068,101 +1068,103 @@ async function aiChatText(userText, context){
   }
 }
 
-async function aiResponsesText(userText){
+function getOpenAIClient(){
   try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+    const apiKey = process.env.OPENAI_API_KEY || '';
+    if(!apiKey) return null;
+    const baseURL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/,'');
+    const mod = require('openai');
+    const OpenAI = mod.default || mod.OpenAI || mod;
+    return new OpenAI({ apiKey, baseURL });
+  }catch(_){ return null; }
+}
+
+async function callWithModelFallback(fn){
+  const primary = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
+  try{ return await fn(primary); }catch(_){ }
+  try{ return await fn(fallback); }catch(_){ }
+  return { ok:false, output:'', error:'provider_error' };
+}
+
+async function aiResponsesText(userText){
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input: String(userText||'') });
-    return String(resp?.output_text||'');
-  }catch(err){ return ''; }
+    return { ok:true, output: String(resp?.output_text||'') };
+  });
+  return r;
 }
 
 async function aiResponsesVision(text, imageUrl){
-  try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-    const resp = await client.responses.create({
-      model,
-      input: [
-        { role:'user', content:[ { type:'input_text', text: String(text||'') }, { type:'input_image', image_url: String(imageUrl||'') } ] }
-      ]
-    });
-    return String(resp?.output_text||'');
-  }catch(err){ return ''; }
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const r = await callWithModelFallback(async (model)=>{
+    const resp = await client.responses.create({ model, input:[ { role:'user', content:[ { type:'input_text', text: String(text||'') }, { type:'input_image', image_url: String(imageUrl||'') } ] } ] });
+    return { ok:true, output: String(resp?.output_text||'') };
+  });
+  return r;
 }
 
 async function aiResponsesWebSearch(userText){
-  try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, tools:[ { type:'web_search' } ], input: String(userText||'') });
-    return String(resp?.output_text||'');
-  }catch(err){ return ''; }
+    return { ok:true, output: String(resp?.output_text||'') };
+  });
+  return r;
 }
 
 async function aiResponsesFileSearch(userText){
-  try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-    const vectorStoreId = process.env.VECTOR_STORE_ID || '';
-    if(!vectorStoreId){ return '尚未設定 VECTOR_STORE_ID，無法使用檔案搜尋。'; }
-    const resp = await client.responses.create({
-      model,
-      input: String(userText||''),
-      tools: [ { type:'file_search', vector_store_ids:[ vectorStoreId ] } ]
-    });
-    return String(resp?.output_text||'');
-  }catch(err){ return ''; }
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const vectorStoreId = process.env.VECTOR_STORE_ID || '';
+  if(!vectorStoreId){ return { ok:false, output:'', error:'no_vector_store' }; }
+  const r = await callWithModelFallback(async (model)=>{
+    const resp = await client.responses.create({ model, input:String(userText||''), tools:[ { type:'file_search', vector_store_ids:[ vectorStoreId ] } ] });
+    return { ok:true, output: String(resp?.output_text||'') };
+  });
+  return r;
 }
 
 async function aiResponsesFunctionTool(userText){
-  try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-    const tools = [
-      {
-        type:'function',
-        name:'get_weather',
-        description:'Get current temperature for a given location.',
-        parameters:{ type:'object', properties:{ location:{ type:'string', description:'City and country e.g. Bogotá, Colombia' } }, required:['location'], additionalProperties:false },
-        strict:true
-      }
-    ];
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const tools = [ { type:'function', name:'get_weather', description:'Get current temperature for a given location.', parameters:{ type:'object', properties:{ location:{ type:'string', description:'City and country e.g. Bogotá, Colombia' } }, required:['location'], additionalProperties:false }, strict:true } ];
+  const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input:[ { role:'user', content:String(userText||'') } ], tools });
-    return String(resp?.output?.[0]?.to_json?.() || resp?.output_text || '');
-  }catch(err){ return ''; }
+    const out = String((resp?.output?.[0] && resp.output[0].to_json && resp.output[0].to_json()) || resp?.output_text || '');
+    return { ok:true, output: out };
+  });
+  return r;
 }
 
 async function aiResponsesMcp(userText){
-  try{
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-    const resp = await client.responses.create({
-      model,
-      tools:[ { type:'mcp', server_label:'dmcp', server_description:'A Dungeons and Dragons MCP server to assist with dice rolling.', server_url:'https://dmcp-server.deno.dev/sse', require_approval:'never' } ],
-      input: String(userText||'')
-    });
-    return String(resp?.output_text||'');
-  }catch(err){ return ''; }
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const r = await callWithModelFallback(async (model)=>{
+    const resp = await client.responses.create({ model, tools:[ { type:'mcp', server_label:'dmcp', server_description:'A Dungeons and Dragons MCP server to assist with dice rolling.', server_url:'https://dmcp-server.deno.dev/sse', require_approval:'never' } ], input:String(userText||'') });
+    return { ok:true, output: String(resp?.output_text||'') };
+  });
+  return r;
 }
 
 async function aiResponsesStreamOnce(userText){
-  try{
-    const { OpenAI } = await import('openai');
-    const client = new OpenAI();
-    const model = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-    // For LINE we aggregate stream and return as one message
+  const client = getOpenAIClient();
+  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  const primary = process.env.OPENAI_RESP_MODEL || 'gpt-5';
+  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
+  async function run(model){
     const stream = await client.responses.create({ model, input:[ { role:'user', content:String(userText||'') } ], stream:true });
     let out='';
     for await (const ev of stream){ out += String(ev?.output_text||''); }
-    return out || '';
-  }catch(err){ return ''; }
+    return out;
+  }
+  try{ const out = await run(primary); return { ok: !!out, output: out||'' }; }catch(_){ }
+  try{ const out = await run(fallback); return { ok: !!out, output: out||'' }; }catch(_){ }
+  return { ok:false, output:'', error:'provider_error' };
 }
 
 async function aiAgentsTriage(userText){
@@ -1173,8 +1175,8 @@ async function aiAgentsTriage(userText){
     const englishAgent = new Agent({ name:'English agent', instructions:'You only speak English' });
     const triageAgent = new Agent({ name:'Triage agent', instructions:'Handoff to the appropriate agent based on the language of the request.', handoffs:[ spanishAgent, englishAgent ] });
     const result = await run(triageAgent, String(userText||''));
-    return String(result?.finalOutput||'');
-  }catch(err){ return ''; }
+    return { ok:true, output: String(result?.finalOutput||'') };
+  }catch(err){ return { ok:false, output:'', error:'agent_error' }; }
 }
 
 async function aiOpsParse(text, context){
@@ -2876,72 +2878,72 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && reqPath === '/api/ai/agents/triage'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiAgentsTriage(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiAgentsTriage(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (text)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/text'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesText(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesText(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (vision)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/vision'){
     const raw = await parseBody(req);
     const { text='', imageUrl='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesVision(text, imageUrl);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesVision(text, imageUrl);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (web_search)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/web_search'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesWebSearch(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesWebSearch(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (file_search)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/file_search'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesFileSearch(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesFileSearch(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (function tool)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/function_tool'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesFunctionTool(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesFunctionTool(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (MCP)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/mcp'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesMcp(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesMcp(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 
   // OpenAI Responses API (stream aggregated)
   if (req.method === 'POST' && reqPath === '/api/ai/responses/stream'){
     const raw = await parseBody(req);
     const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-    const out = await aiResponsesStreamOnce(input);
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok:true, output: out }));
+    const r = await aiResponsesStreamOnce(input);
+    res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(r));
   }
 });
 
