@@ -1382,27 +1382,82 @@
   function renderChart(){
     const modeSel = $('#statsMode');
     const root = $('#statsChart');
+    const details = $('#statsDetails');
     if(!modeSel || !root){ return; }
     const mode = modeSel.value;
     DB.getTransactions().then(items=>{
-      let groups;
-      if(mode==='yearly'){
-        groups = groupByYear(items);
-      }else{
-        const y = String(new Date().getFullYear());
-        groups = groupByMonth(items.filter(t=>(t.date||'').startsWith(y)));
+      const y = String(new Date().getFullYear());
+      const curYear = items.filter(t=>(t.date||'').startsWith(y));
+      const byMonth = groupByMonth(curYear);
+      const byYear = groupByYear(items);
+      function sum(arr, pred){ return arr.filter(pred).reduce((s,t)=> s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1), 0); }
+      function renderBars(series){
+        const max = Math.max(1, ...series.map(d=>Math.abs(d.value)));
+        root.innerHTML = series.map(d=>{
+          const h = Math.round((Math.abs(d.value) / max) * 180) + 8;
+          const cls = d.value<0 ? 'bar negative' : 'bar';
+          const title = `${d.label}: $${formatAmount(d.value)}`;
+          return `<div title="${title}" class="${cls}" style="height:${h}px"></div>`;
+        }).join('');
       }
-      const entries = Array.from(groups.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
-      const data = entries.map(([label, arr])=>{
-        const income = arr.filter(t=>t.type==='income').reduce((s,t)=>s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
-        const expense = arr.filter(t=>t.type==='expense').reduce((s,t)=>s+toBaseCurrency(t.amount, t.currency||'TWD', t.rate||1),0);
-        return { label, value: Math.max(income-expense, 0) };
-      });
-      const max = Math.max(1, ...data.map(d=>d.value));
-      root.innerHTML = data.map(d=>{
-        const h = Math.round((d.value / max) * 180) + 8;
-        return `<div title="${d.label}: $${formatAmount(d.value)}" class="bar" style="height:${h}px"></div>`;
-      }).join('');
+      function renderDetails(rows){
+        if(!details) return;
+        details.innerHTML = rows.map(r=>`<div>${r}</div>`).join('');
+      }
+
+      if(mode==='yearly'){
+        const entries = Array.from(byYear.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
+        const series = entries.map(([label, arr])=>({ label, value: sum(arr,t=>t.type==='income') - sum(arr,t=>t.type==='expense') }));
+        renderBars(series);
+        renderDetails(entries.map(([label, arr])=>{
+          const inc = sum(arr,t=>t.type==='income'); const exp = sum(arr,t=>t.type==='expense');
+          return `${label}｜收入 $${formatAmount(inc)}｜支出 $${formatAmount(exp)}｜結餘 $${formatAmount(inc-exp)}`;
+        }));
+        return;
+      }
+
+      if(mode==='monthly_income' || mode==='monthly_expense' || mode==='monthly'){
+        const entries = Array.from(byMonth.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
+        const series = entries.map(([label, arr])=>{
+          const inc = sum(arr,t=>t.type==='income');
+          const exp = sum(arr,t=>t.type==='expense');
+          const val = (mode==='monthly_income') ? inc : (mode==='monthly_expense' ? exp : (inc-exp));
+          return { label, value: val*(mode==='monthly_expense'?-1:1) };
+        });
+        renderBars(series);
+        renderDetails(entries.map(([label, arr])=>{
+          const inc = sum(arr,t=>t.type==='income'); const exp = sum(arr,t=>t.type==='expense');
+          return `${label}｜收入 $${formatAmount(inc)}｜支出 $${formatAmount(exp)}｜結餘 $${formatAmount(inc-exp)}`;
+        }));
+        return;
+      }
+
+      if(mode==='monthly_category'){
+        const ym = `${y}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+        const monthTx = curYear.filter(t=> (t.date||'').startsWith(ym) && t.type==='expense');
+        const byCat = monthTx.reduce((m,t)=>{ m.set(t.categoryId, (m.get(t.categoryId)||0)+toBaseCurrency(t.amount,t.currency||'TWD',t.rate||1)); return m; }, new Map());
+        const rows = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]);
+        const series = rows.map(([id,v])=>({ label:id, value: -v }));
+        renderBars(series);
+        renderDetails(rows.map(([id,v])=> `${id}：$${formatAmount(v)}`));
+        return;
+      }
+
+      if(mode==='monthly_cumulative'){
+        const entries = Array.from(byMonth.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
+        let acc = 0; const series = entries.map(([label, arr])=>{ acc += sum(arr,t=>t.type==='income') - sum(arr,t=>t.type==='expense'); return { label, value: acc }; });
+        renderBars(series);
+        renderDetails(entries.map(([label, arr],i)=> `${label}：累積 $${formatAmount(series[i].value)}`));
+        return;
+      }
+
+      if(mode==='unclaimed'){
+        const pending = curYear.filter(t=> t.type==='expense' && t.claimed!==true);
+        const sumPending = sum(pending, ()=>true);
+        renderBars([ { label:'未請款', value: -sumPending } ]);
+        renderDetails([ `未請款筆數：${pending.length}｜金額：$${formatAmount(sumPending)}` ]);
+        return;
+      }
     });
   }
 

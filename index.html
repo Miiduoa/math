@@ -173,12 +173,18 @@
         <h2>統計與圖表</h2>
         <div class="filters">
           <select id="statsMode">
-            <option value="monthly">每月 (當年度)</option>
+            <option value="monthly">每月結餘 (當年度)</option>
+            <option value="monthly_income">每月收入 (當年度)</option>
+            <option value="monthly_expense">每月支出 (當年度)</option>
+            <option value="monthly_category">本月分類支出</option>
+            <option value="monthly_cumulative">本月累積結餘</option>
+            <option value="unclaimed">未請款概況</option>
             <option value="yearly">每年 (全部)</option>
           </select>
         </div>
       </div>
       <div id="statsChart" class="chart"></div>
+      <div id="statsDetails" class="card" style="margin-top:8px"></div>
     </section>
 
     <section class="card" data-tab="assistant">
