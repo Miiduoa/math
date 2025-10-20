@@ -2895,6 +2895,150 @@ const server = http.createServer(async (req, res) => {
               }
               continue;
             }
+
+            // 月曆（簡要 Flex + 快捷按鈕）
+            if(/月曆/.test(text)){
+              const now = new Date();
+              const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+              const title = '月曆檢視';
+              const subtitle = ym;
+              const bubble = glassFlexBubble({
+                baseUrl: getBaseUrl(req)||PUBLIC_BASE_URL||'',
+                title,
+                subtitle,
+                lines:[ '查看本月每日收入/支出概況，於網頁版可互動篩選。' ],
+                buttons:[
+                  { style:'secondary', color:'#64748b', action:{ type:'message', label:'最近交易', text:'最近交易' } },
+                  { style:'link', action:{ type:'uri', label:'開啟月曆', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } }
+                ],
+                showHero:false,
+                compact:true
+              });
+              await lineReply(replyToken, [{ type:'flex', altText:'月曆檢視', contents:bubble }]);
+              continue;
+            }
+
+            // 批次新增（說明）
+            if(/批次新增/.test(text)){
+              const bubble = glassFlexBubble({
+                baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'',
+                title:'批次新增說明',
+                subtitle:'每行一筆，支援中文金額與日期',
+                lines:[
+                  '格式範例：',
+                  '10/5 咖啡 100',
+                  '10/6 全聯 800',
+                  '10/6 星巴克 500',
+                  '貼上多行後直接送出即可'
+                ],
+                buttons:[ { style:'secondary', color:'#64748b', action:{ type:'message', label:'打開選單', text:'選單' } } ],
+                showHero:false,
+                compact:true
+              });
+              await lineReply(replyToken, [{ type:'flex', altText:'批次新增說明', contents:bubble }]);
+              continue;
+            }
+
+            // AI 助理（提示）
+            if(/^(AI|AI\s*助理)$/i.test(text)){
+              const bubble = glassFlexBubble({
+                baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'',
+                title:'AI 助理',
+                subtitle:'可用自然語言記帳/查詢/修改',
+                lines:[ '直接輸入：例如「支出 120 餐飲 今天 咖啡」', '或輸入「刪除上次」/「本月支出」' ],
+                buttons:[ { style:'secondary', color:'#64748b', action:{ type:'message', label:'打開選單', text:'選單' } } ],
+                showHero:false,
+                compact:true
+              });
+              await lineReply(replyToken, [{ type:'flex', altText:'AI 助理', contents:bubble }]);
+              continue;
+            }
+
+            // 記事：新增（訊息以「記事：內容」或「記事 內容」開頭）
+            if(/^記事\s*[:：]?\s*.+/.test(text)){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const m = text.match(/^記事\s*[:：]?\s*(.+)$/);
+              const content = (m && m[1]) ? m[1].trim() : '';
+              if(content){
+                try{
+                  if(!isDbEnabled()){
+                    const rows = getNotes(uid);
+                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), title:'', content, tags:[], emoji:'', color:'', pinned:false, archived:false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                    rows.unshift(rec); setNotes(uid, rows);
+                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增記事', subtitle:new Date().toLocaleString('zh-TW'), lines:[ content.slice(0,80) ], showHero:false, compact:true });
+                    await lineReply(replyToken, [{ type:'flex', altText:'已新增記事', contents:bubble }]);
+                    continue;
+                  }
+                }catch(_){ /* ignore */ }
+              }
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增記事', subtitle:'請以「記事：內容」格式輸入', lines:[], showHero:false, compact:true });
+              await lineReply(replyToken, [{ type:'flex', altText:'新增記事', contents:bubble }]);
+              continue;
+            }
+
+            // 新增記事（提示）
+            if(/新增記事/.test(text)){
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增記事', subtitle:'請以「記事：內容」格式輸入', lines:['例如：記事：今天午餐筆記'], showHero:false, compact:true });
+              await lineReply(replyToken, [{ type:'flex', altText:'新增記事', contents:bubble }]);
+              continue;
+            }
+
+            // 記事清單（最近 5 筆）
+            if(/記事清單/.test(text)){
+              try{
+                const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                if(!isDbEnabled()){
+                  const rows = getNotes(uid).slice(0,5);
+                  const lines = rows.length? rows.map(n=> `${new Date(n.updatedAt||n.createdAt).toLocaleString()}｜${(n.title||'').slice(0,20)}${n.title?'：':''}${(n.content||'').slice(0,40)}`) : ['目前沒有記事'];
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'記事清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'記事清單', contents:bubble }]);
+                  continue;
+                }
+              }catch(_){ /* ignore */ }
+            }
+
+            // 提醒：新增（訊息以「提醒：內容 [YYYY-MM-DD[ HH:MM]]」）
+            if(/^提醒\s*[:：]?\s*.+/.test(text)){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const s = text.replace(/^提醒\s*[:：]?\s*/,'');
+              const m = s.match(/(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
+              const title = m ? s.replace(m[0],'').trim() : s.trim();
+              let dueAt = '';
+              if(m){
+                const iso = m[1] + (m[2]?`T${m[2]}:00`:'T00:00:00');
+                try{ dueAt = new Date(iso).toISOString(); }catch(_){ dueAt=''; }
+              }
+              if(title){
+                try{
+                  if(!isDbEnabled()){
+                    const rows = getReminders(uid);
+                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), title, note:'', priority:'medium', tags:[], repeat:'none', monthDay:undefined, weekdays:[], done:false, dueAt, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                    rows.unshift(rec); setReminders(uid, rows);
+                    const line1 = dueAt ? `${new Date(dueAt).toLocaleString()}｜${title}` : title;
+                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增提醒', subtitle:new Date().toLocaleString('zh-TW'), lines:[ line1 ], showHero:false, compact:true });
+                    await lineReply(replyToken, [{ type:'flex', altText:'已新增提醒', contents:bubble }]);
+                    continue;
+                  }
+                }catch(_){ /* ignore */ }
+              }
+              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增提醒', subtitle:'請以「提醒：內容 YYYY-MM-DD[ HH:MM]」輸入', lines:['日期可省略'], showHero:false, compact:true });
+              await lineReply(replyToken, [{ type:'flex', altText:'新增提醒', contents:bubble }]);
+              continue;
+            }
+
+            // 提醒清單（最近 5 筆）
+            if(/提醒清單/.test(text)){
+              try{
+                const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+                if(!isDbEnabled()){
+                  const rows = getReminders(uid).slice(0,5);
+                  const lines = rows.length? rows.map(r=> `${r.dueAt?new Date(r.dueAt).toLocaleString():'無期限'}｜${r.title}`) : ['目前沒有提醒'];
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'提醒清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'提醒清單', contents:bubble }]);
+                  continue;
+                }
+              }catch(_){ /* ignore */ }
+            }
             // Multi-line batch add: split by newline/;； then handle each line
             {
               const lines = String(text||'').split(/\r\n|\n|\r|[;；]/).map(s=>String(s).trim()).filter(Boolean);
