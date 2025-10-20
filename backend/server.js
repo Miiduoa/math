@@ -603,6 +603,110 @@ function seenAndMarkRecent(userId, payload, ttlMs=120000){
   }catch{ return false; }
 }
 
+// Reminders guided flow (file-based)
+const remFlow = new Map(); // userId -> { step:'title'|'due'|'repeat'|'repeat_weekdays'|'monthly_day'|'priority'|'note'|'confirm', rec }
+function buildRemTitlePrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '新增提醒',
+    subtitle: '步驟 1/6：內容',
+    lines:[ '請輸入提醒內容（例如：繳電話費、回電客戶）' ],
+    buttons:[ { style:'link', action:{ type:'postback', label:'取消', data:'flow=rem&step=cancel' } } ],
+    showHero:false, compact:true
+  });
+}
+function buildRemDuePrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '設定時間',
+    subtitle: '步驟 2/6：期限',
+    lines:[ '可點選快速選項，或直接輸入 YYYY-MM-DD 或 YYYY-MM-DD HH:MM' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'今天 20:00', data:'flow=rem&step=due&pick=today20' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'明天 09:00', data:'flow=rem&step=due&pick=tomorrow09' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'無期限', data:'flow=rem&step=due&pick=none' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+function buildRemRepeatPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '是否重複',
+    subtitle: '步驟 3/6：週期',
+    lines:[ '選擇提醒重複週期' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'不重複', data:'flow=rem&step=repeat&value=none' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'每天', data:'flow=rem&step=repeat&value=daily' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'每週', data:'flow=rem&step=repeat&value=weekly' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'每月', data:'flow=rem&step=repeat&value=monthly' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+function buildRemWeekdaysPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '每週哪幾天',
+    subtitle: '步驟 3b/6：輸入 0-6（日=0，一=1）',
+    lines:[ '請輸入如：1,3,5；略過可按「跳過」' ],
+    buttons:[ { style:'secondary', color:'#64748b', action:{ type:'postback', label:'跳過', data:'flow=rem&step=weekly_days_skip' } } ],
+    showHero:false, compact:true
+  });
+}
+function buildRemMonthDayPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '每月幾號',
+    subtitle: '步驟 3b/6：1-31',
+    lines:[ '請輸入數字（例如：1 或 28）' ],
+    showHero:false, compact:true
+  });
+}
+function buildRemPriorityPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '優先等級',
+    subtitle: '步驟 4/6：選擇',
+    lines:[ '選擇提醒優先等級' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'低', data:'flow=rem&step=priority&value=low' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'普通', data:'flow=rem&step=priority&value=medium' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'高', data:'flow=rem&step=priority&value=high' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+function buildRemNotePrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '備註（選填）',
+    subtitle: '步驟 5/6：輸入或略過',
+    lines:[ '可直接輸入備註文字，或按「略過」' ],
+    buttons:[ { style:'secondary', color:'#64748b', action:{ type:'postback', label:'略過', data:'flow=rem&step=note_skip' } } ],
+    showHero:false, compact:true
+  });
+}
+function buildRemConfirmBubble(base, rec){
+  const lines = [
+    rec.dueAt ? `時間：${new Date(rec.dueAt).toLocaleString('zh-TW')}` : '時間：無期限',
+    rec.repeat ? `週期：${rec.repeat}` : '週期：不重複',
+    rec.priority ? `優先：${rec.priority}` : undefined,
+    rec.note ? `備註：${rec.note}` : undefined
+  ].filter(Boolean);
+  return glassFlexBubble({
+    baseUrl: base,
+    title: `確認新增：${rec.title||''}`,
+    subtitle: '步驟 6/6：確認',
+    lines,
+    buttons:[
+      { style:'primary', action:{ type:'postback', label:'確認新增', data:'flow=rem&step=confirm&do=1' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=rem&step=cancel' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
 async function computeNudges(userId){
   try{
     const isDb = isDbEnabled();
@@ -2281,6 +2385,61 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
+            // Reminders guided flow (postback)
+            if(flow==='rem'){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              let st = remFlow.get(uid) || { step:'title', rec:{ title:'', dueAt:'', repeat:'none', weekdays:[], monthDay:undefined, priority:'medium', note:'' } };
+              const step = String(dataObj.step||'');
+              if(step==='cancel'){
+                remFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已取消', subtitle:'已中止提醒流程', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已取消', contents:bubble }]);
+                continue;
+              }
+              if(st.step==='title'){
+                // waiting for text, but allow user to restart by pressing menu: show title prompt
+                const bubble = buildRemTitlePrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'新增提醒', contents:bubble }]);
+                continue;
+              }
+              if(step==='due'){
+                const pick = String(dataObj.pick||'');
+                let dt='';
+                if(pick==='today20'){ const d=new Date(); d.setHours(20,0,0,0); dt=d.toISOString(); }
+                else if(pick==='tomorrow09'){ const d=new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0); dt=d.toISOString(); }
+                else if(pick==='none'){ dt=''; }
+                if(dt!==undefined){ st.rec.dueAt = dt; st.step='repeat'; remFlow.set(uid, st); const bubble = buildRemRepeatPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'設定週期', contents:bubble }]); continue; }
+              }
+              if(step==='repeat'){
+                const v = String(dataObj.value||'none');
+                st.rec.repeat = v; remFlow.set(uid, st);
+                if(v==='weekly'){ st.step='repeat_weekdays'; const bubble = buildRemWeekdaysPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'選擇星期', contents:bubble }]); continue; }
+                if(v==='monthly'){ st.step='monthly_day'; const bubble = buildRemMonthDayPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'每月幾號', contents:bubble }]); continue; }
+                st.step='priority'; const bubble = buildRemPriorityPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'設定優先', contents:bubble }]); continue;
+              }
+              if(step==='weekly_days_skip'){
+                st.rec.weekdays=[]; st.step='priority'; remFlow.set(uid, st);
+                const bubble = buildRemPriorityPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'設定優先', contents:bubble }]); continue;
+              }
+              if(step==='note_skip'){
+                st.rec.note=''; st.step='confirm'; remFlow.set(uid, st);
+                const bubble = buildRemConfirmBubble(base, st.rec); await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]); continue;
+              }
+              if(step==='confirm' && dataObj.do==='1'){
+                // finalize (file-based mode only)
+                try{
+                  if(!isDbEnabled()){
+                    const rows = getReminders(uid);
+                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...st.rec, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+                    rows.unshift(rec); setReminders(uid, rows);
+                  }
+                }catch(_){ }
+                remFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已新增提醒', subtitle:new Date().toLocaleString('zh-TW'), lines:[ st.rec.title||'' ], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已新增提醒', contents:bubble }]);
+                continue;
+              }
+            }
             // Admin actions
             if(flow==='admin'){
               const replyToken = ev.replyToken;
@@ -2599,6 +2758,71 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            // Reminders guided flow (message input)
+            {
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              let st = remFlow.get(uid);
+              if(/^(新增提醒|提醒)$/.test(text)){
+                st = { step:'title', rec:{ title:'', dueAt:'', repeat:'none', weekdays:[], monthDay:undefined, priority:'medium', note:'' } };
+                remFlow.set(uid, st);
+                const bubble = buildRemTitlePrompt(getBaseUrl(req)||'');
+                await lineReply(replyToken, [{ type:'flex', altText:'新增提醒', contents:bubble }]);
+                continue;
+              }
+              if(st){
+                if(st.step==='title'){
+                  st.rec.title = text;
+                  st.step='due'; remFlow.set(uid, st);
+                  const bubble = buildRemDuePrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'設定期限', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='due'){
+                  // allow free text date
+                  const m = text.match(/(20\d{2}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
+                  if(m){
+                    const iso = m[1] + (m[2]?`T${m[2]}:00`:'T00:00:00');
+                    try{ st.rec.dueAt = new Date(iso).toISOString(); }catch(_){ st.rec.dueAt=''; }
+                  }else if(/無期限|無|略過/.test(text)){ st.rec.dueAt=''; }
+                  st.step='repeat'; remFlow.set(uid, st);
+                  const bubble = buildRemRepeatPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'設定週期', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='repeat_weekdays'){
+                  const nums = text.split(/[,，\s]+/).map(s=> s.trim()).filter(Boolean).map(s=> Number(s)).filter(n=> n>=0 && n<=6);
+                  st.rec.weekdays = nums;
+                  st.step='priority'; remFlow.set(uid, st);
+                  const bubble = buildRemPriorityPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'設定優先', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='monthly_day'){
+                  const n = Number(text);
+                  if(Number.isFinite(n) && n>=1 && n<=31){ st.rec.monthDay = n; }
+                  st.step='priority'; remFlow.set(uid, st);
+                  const bubble = buildRemPriorityPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'設定優先', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='priority'){
+                  if(/低/.test(text)) st.rec.priority='low';
+                  else if(/高/.test(text)) st.rec.priority='high';
+                  else st.rec.priority='medium';
+                  st.step='note'; remFlow.set(uid, st);
+                  const bubble = buildRemNotePrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'新增備註', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='note'){
+                  st.rec.note = (/略過/.test(text)) ? '' : text;
+                  st.step='confirm'; remFlow.set(uid, st);
+                  const bubble = buildRemConfirmBubble(getBaseUrl(req)||'', st.rec);
+                  await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]);
+                  continue;
+                }
+              }
+            }
             // Admin: open menu or broadcast input handler
             if(isLineAdmin(lineUidRaw)){
               if(/^管理$|^admin$/i.test(text)){
