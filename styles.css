@@ -305,6 +305,14 @@ img,video{max-width:100%;height:auto}
   #settingsForm .inline{ flex-wrap:wrap }
   #categoryBudgetList .inline{ gap:8px }
   #categoryBudgetList input[type="number"]{ width:120px }
+  /* Notes & Reminders: make rows wrap on small screens to avoid horizontal scroll */
+  .assistant .inline{ flex-wrap:wrap }
+  .assistant .inline input[type="text"],
+  .assistant .inline input[type="search"],
+  .assistant .inline input[type="datetime-local"],
+  .assistant .inline input[type="number"],
+  .assistant .inline textarea,
+  .assistant .inline select{ flex:1 1 100%; min-width:0 }
 }
 /* iOS-like tighter mobile polish */
 @media (max-width:560px){
