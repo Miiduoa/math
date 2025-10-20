@@ -620,10 +620,14 @@ function buildRemDuePrompt(base){
     baseUrl: base,
     title: '設定時間',
     subtitle: '步驟 2/6：期限',
-    lines:[ '可點選快速選項，或直接輸入 YYYY-MM-DD 或 YYYY-MM-DD HH:MM' ],
+    lines:[ '可點快速選項，或輸入：今天/明天/後天/本週X/下週X/月底 + 時間（可省略）' ],
     buttons:[
-      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'今天 20:00', data:'flow=rem&step=due&pick=today20' } },
-      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'明天 09:00', data:'flow=rem&step=due&pick=tomorrow09' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'今晚 20:00', data:'flow=rem&step=due&pick=today20' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'明早 09:00', data:'flow=rem&step=due&pick=tomorrow09' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'後天 09:00', data:'flow=rem&step=due&pick=dayafter09' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'本週五 18:00', data:'flow=rem&step=due&pick=thisfri18' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'下週一 09:00', data:'flow=rem&step=due&pick=nextmon09' } },
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'月底 18:00', data:'flow=rem&step=due&pick=monthend18' } },
       { style:'secondary', color:'#64748b', action:{ type:'postback', label:'無期限', data:'flow=rem&step=due&pick=none' } }
     ],
     showHero:false, compact:true
@@ -2407,6 +2411,10 @@ const server = http.createServer(async (req, res) => {
                 let dt='';
                 if(pick==='today20'){ const d=new Date(); d.setHours(20,0,0,0); dt=d.toISOString(); }
                 else if(pick==='tomorrow09'){ const d=new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0); dt=d.toISOString(); }
+                else if(pick==='dayafter09'){ const d=new Date(); d.setDate(d.getDate()+2); d.setHours(9,0,0,0); dt=d.toISOString(); }
+                else if(pick==='thisfri18'){ const d=new Date(); const cur=d.getDay(); const target=5; const add=(target-cur+7)%7; d.setDate(d.getDate()+(add||0)); d.setHours(18,0,0,0); dt=d.toISOString(); }
+                else if(pick==='nextmon09'){ const d=new Date(); const cur=d.getDay(); const add=((1 - cur + 7) % 7) || 7; d.setDate(d.getDate()+add); d.setHours(9,0,0,0); dt=d.toISOString(); }
+                else if(pick==='monthend18'){ const d=new Date(); d.setMonth(d.getMonth()+1, 0); d.setHours(18,0,0,0); dt=d.toISOString(); }
                 else if(pick==='none'){ dt=''; }
                 if(dt!==undefined){ st.rec.dueAt = dt; st.step='repeat'; remFlow.set(uid, st); const bubble = buildRemRepeatPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'設定週期', contents:bubble }]); continue; }
               }
