@@ -942,6 +942,8 @@
           nudges: $('#nudgesToggle').checked,
           appearance: $('#appearanceSelect') ? $('#appearanceSelect').value : 'system',
           serverUrl: $('#serverUrl') ? $('#serverUrl').value.trim() : '',
+          pushStart: $('#pushStart') ? $('#pushStart').value : '',
+          pushEnd: $('#pushEnd') ? $('#pushEnd').value : '',
           categoryBudgets: budgets
         });
         settingsDialog.close();
