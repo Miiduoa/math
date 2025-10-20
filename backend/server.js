@@ -37,6 +37,8 @@ const LINE_LOGIN_REDIRECT_URI = process.env.LINE_LOGIN_REDIRECT_URI || '';
 const ADMIN_LINE_USER_ID = process.env.ADMIN_LINE_USER_ID || 'U5c7738d89a59ff402fd6b56f5472d351';
 // Allow anonymous access for AI endpoints even if REQUIRE_AUTH=true
 const AI_ALLOW_ANON = String(process.env.AI_ALLOW_ANON||'false').toLowerCase()==='true';
+// Public base URL for building absolute links in LINE Flex URI buttons (must be https)
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.BASE_URL || '').replace(/\/$/, '');
 
 // Runtime toggles (in-memory) for ops without redeploy
 const runtimeToggles = {
@@ -387,6 +389,11 @@ function getBaseUrl(req){
     const host = (req.headers['x-forwarded-host']||req.headers.host||'').toString();
     if(host){ return `${proto}://${host}`; }
   }catch(_){ }
+  // Fallback to configured PUBLIC_BASE_URL (should be full https URL)
+  if(PUBLIC_BASE_URL){
+    if(/^https?:\/\//.test(PUBLIC_BASE_URL)) return PUBLIC_BASE_URL;
+    return `https://${PUBLIC_BASE_URL}`;
+  }
   return '';
 }
 
@@ -1833,6 +1840,39 @@ const server = http.createServer(async (req, res) => {
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));
+    }
+
+    // LINE diagnostics: verify env/config and webhook reachability
+    if (req.method === 'GET' && reqPath === '/api/line/diagnostics'){
+      const base = getBaseUrl(req) || '';
+      const out = {
+        ok: true,
+        webhookEndpoint: `${base}/line/webhook`,
+        hasChannelSecret: !!(LINE_CHANNEL_SECRET||'').trim(),
+        hasAccessToken: !!(LINE_CHANNEL_ACCESS_TOKEN||'').trim(),
+        publicBaseUrl: base || PUBLIC_BASE_URL || '',
+        suggestions: []
+      };
+      if(!out.hasAccessToken){ out.suggestions.push('設定 LINE_CHANNEL_ACCESS_TOKEN'); }
+      if(!out.hasChannelSecret){ out.suggestions.push('設定 LINE_CHANNEL_SECRET（否則簽章驗證將略過）'); }
+      if(!/^https:\/\//.test(base||PUBLIC_BASE_URL||'')){
+        out.suggestions.push('設定 PUBLIC_BASE_URL 為 https:// 供 Flex 按鈕使用');
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(out));
+    }
+
+    // LINE ping: push a test Flex message to admin to verify buttons
+    if (req.method === 'POST' && reqPath === '/api/line/ping'){
+      const ADMIN_KEY = process.env.ADMIN_KEY || '';
+      const hasKey = ADMIN_KEY && String(req.headers['x-admin-key']||'')===ADMIN_KEY;
+      if(!hasKey){ res.writeHead(403, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'forbidden' })); }
+      if(!LINE_CHANNEL_ACCESS_TOKEN){ res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'missing_access_token' })); }
+      const to = ADMIN_LINE_USER_ID;
+      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'Ping 測試', subtitle:new Date().toLocaleString('zh-TW'), lines:['這是一則測試訊息','請點選下方按鈕驗證動作'], buttons:[ { style:'primary', action:{ type:'postback', label:'功能選單', data:'flow=menu' } }, { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+      const ok = await linePush(to, [{ type:'flex', altText:'Ping 測試', contents:bubble }]);
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok }));
     }
 
     // Admin: update toggles (in-memory) and optional OpenAI config
