@@ -2421,6 +2421,14 @@ const server = http.createServer(async (req, res) => {
                 st.rec.weekdays=[]; st.step='priority'; remFlow.set(uid, st);
                 const bubble = buildRemPriorityPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'設定優先', contents:bubble }]); continue;
               }
+              if(step==='priority'){
+                const v = String(dataObj.value||'medium');
+                st.rec.priority = (v==='low'||v==='high') ? v : 'medium';
+                st.step='note'; remFlow.set(uid, st);
+                const bubble = buildRemNotePrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'新增備註', contents:bubble }]);
+                continue;
+              }
               if(step==='note_skip'){
                 st.rec.note=''; st.step='confirm'; remFlow.set(uid, st);
                 const bubble = buildRemConfirmBubble(base, st.rec); await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]); continue;
