@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>使用者同步測試</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .info { color: blue; }
+        .note-item { margin: 10px 0; padding: 10px; background: #f5f5f5; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>使用者同步測試</h1>
+    
+    <div class="test-section">
+        <h2>1. 檢查目前使用者狀態</h2>
+        <button onclick="checkUser()">檢查使用者</button>
+        <div id="userResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>2. 模擬 LINE 機器人新增記事</h2>
+        <button onclick="simulateLineBot()">模擬 LINE 機器人</button>
+        <div id="lineResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>3. 檢查網頁端記事清單</h2>
+        <button onclick="checkWebNotes()">檢查網頁端記事</button>
+        <div id="webResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>4. 測試記事同步</h2>
+        <div id="notesList" class="tx-list" style="margin-top:8px"></div>
+        <button onclick="loadNotes()">載入記事</button>
+    </div>
+
+    <script>
+        // 模擬網頁端的 $ 函數
+        function $(id) {
+            return document.getElementById(id);
+        }
+
+        // 模擬網頁端的 fetchNotes 函數
+        async function fetchNotes() {
+            try {
+                const r = await fetch('/api/notes');
+                return await r.json();
+            } catch (_) {
+                return [];
+            }
+        }
+
+        // 模擬網頁端的 renderNotes 函數
+        async function renderNotes() {
+            const list = $('#notesList');
+            if (!list) return;
+            
+            const rows = await fetchNotes();
+            
+            list.innerHTML = rows.map(n => `<div class="note-item" data-id="${n.id}">
+                <div>
+                    <div><strong>${(n.emoji ? n.emoji + ' ' : '')}${(n.title || '(無標題)').replace(/[<>&]/g, '')}</strong></div>
+                    <small>${new Date(n.updatedAt || n.createdAt).toLocaleString()}</small>
+                    <div>${(n.content || '').replace(/[<>&]/g, '')}</div>
+                </div>
+            </div>`).join('');
+        }
+
+        async function checkUser() {
+            const resultDiv = document.getElementById('userResult');
+            try {
+                const response = await fetch('/api/me');
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<span class="success">✅ 已登入: ${data.user?.name || '未知使用者'} (ID: ${data.user?.id})</span>`;
+                } else {
+                    resultDiv.innerHTML = `<span class="info">ℹ️ 未登入 (狀態: ${response.status})</span>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 檢查失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function simulateLineBot() {
+            const resultDiv = document.getElementById('lineResult');
+            try {
+                // 模擬 LINE 機器人新增記事
+                const response = await fetch('/api/notes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: 'LINE 機器人測試記事',
+                        content: '這是透過 LINE 機器人新增的記事，用來測試同步功能',
+                        tags: ['LINE', '機器人', '測試'],
+                        emoji: '🤖',
+                        color: 'blue'
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.ok) {
+                    resultDiv.innerHTML = `<span class="success">✅ LINE 機器人新增成功: ${data.note.id}</span>`;
+                } else {
+                    resultDiv.innerHTML = '<span class="error">❌ LINE 機器人新增失敗</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 模擬失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function checkWebNotes() {
+            const resultDiv = document.getElementById('webResult');
+            try {
+                const notes = await fetchNotes();
+                resultDiv.innerHTML = `<span class="success">✅ 網頁端找到 ${notes.length} 筆記事</span><br>`;
+                
+                if (notes.length > 0) {
+                    resultDiv.innerHTML += '<div style="margin-top: 10px;"><strong>記事清單：</strong></div>';
+                    notes.forEach((note, index) => {
+                        resultDiv.innerHTML += `<div class="note-item">
+                            <strong>${index + 1}. ${note.emoji || ''} ${note.title || '(無標題)'}</strong><br>
+                            <small>ID: ${note.id}</small><br>
+                            <small>內容: ${note.content.slice(0, 50)}...</small><br>
+                            <small>時間: ${new Date(note.updatedAt || note.createdAt).toLocaleString()}</small>
+                        </div>`;
+                    });
+                } else {
+                    resultDiv.innerHTML += '<span class="info">ℹ️ 目前沒有記事</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 檢查失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function loadNotes() {
+            await renderNotes();
+        }
+
+        // 頁面載入時自動測試
+        window.onload = function() {
+            checkUser();
+            checkWebNotes();
+            loadNotes();
+        };
+    </script>
+</body>
+</html>

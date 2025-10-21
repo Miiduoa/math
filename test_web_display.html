@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>網頁端記事顯示測試</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .info { color: blue; }
+        .note-item { margin: 10px 0; padding: 10px; background: #f5f5f5; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>網頁端記事顯示測試</h1>
+    
+    <div class="test-section">
+        <h2>1. 檢查 API 連線</h2>
+        <button onclick="checkAPI()">檢查 API</button>
+        <div id="apiResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>2. 模擬網頁端記事功能</h2>
+        <button onclick="simulateWebNotes()">模擬網頁端記事功能</button>
+        <div id="webResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>3. 檢查使用者認證</h2>
+        <button onclick="checkAuth()">檢查認證狀態</button>
+        <div id="authResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>4. 測試記事清單顯示</h2>
+        <div id="notesList" class="tx-list" style="margin-top:8px"></div>
+        <button onclick="loadNotes()">載入記事</button>
+    </div>
+
+    <script>
+        // 模擬網頁端的 $ 函數
+        function $(id) {
+            return document.getElementById(id);
+        }
+
+        // 模擬網頁端的 fetchNotes 函數
+        async function fetchNotes() {
+            try {
+                const r = await fetch('/api/notes');
+                return await r.json();
+            } catch (_) {
+                return [];
+            }
+        }
+
+        // 模擬網頁端的 renderNotes 函數
+        async function renderNotes() {
+            const list = $('#notesList');
+            if (!list) return;
+            
+            const q = ($('#noteSearchInput')?.value || '').trim().toLowerCase();
+            const rows = await fetchNotes();
+            const filtered = q ? rows.filter(n => (n.title || '').toLowerCase().includes(q) || (n.content || '').toLowerCase().includes(q)) : rows;
+            
+            list.innerHTML = filtered.map(n => `<li class="tx-item" data-id="${n.id}">
+                <div>
+                    <div><strong>${(n.emoji ? n.emoji + ' ' : '')}${(n.title || '(無標題)').replace(/[<>&]/g, '')}</strong>${n.pinned ? ' <span class="badge">釘選</span>' : ''}${n.archived ? ' <span class="badge">封存</span>' : ''}</div>
+                    <small>${new Date(n.updatedAt || n.createdAt).toLocaleString()}${(n.tags && n.tags.length) ? ' ｜ ' + n.tags.map(t => `#${t}`).join(' ') : ''}</small>
+                    <div>${(n.content || '').replace(/[<>&]/g, '')}</div>
+                </div>
+                <div class="tx-actions">
+                    <button class="ghost" data-action="pin">${n.pinned ? '取消釘選' : '釘選'}</button>
+                    <button class="ghost" data-action="archive">${n.archived ? '取消封存' : '封存'}</button>
+                    <button class="ghost" data-action="tag">標籤</button>
+                    <button class="ghost" data-action="edit">編輯</button>
+                    <button class="ghost danger" data-action="delete">刪除</button>
+                </div>
+            </li>`).join('');
+        }
+
+        async function checkAPI() {
+            const resultDiv = document.getElementById('apiResult');
+            try {
+                const response = await fetch('/api/notes');
+                const data = await response.json();
+                resultDiv.innerHTML = `<span class="success">✅ API 連線成功，取得 ${data.length} 筆記事</span>`;
+                console.log('API 回應:', data);
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ API 連線失敗: ${error.message}</span>`;
+                console.error('API 錯誤:', error);
+            }
+        }
+
+        async function simulateWebNotes() {
+            const resultDiv = document.getElementById('webResult');
+            try {
+                // 模擬網頁端的記事功能
+                const notes = await fetchNotes();
+                resultDiv.innerHTML = `<span class="success">✅ 模擬網頁端記事功能成功，取得 ${notes.length} 筆記事</span><br>`;
+                
+                if (notes.length > 0) {
+                    resultDiv.innerHTML += '<div style="margin-top: 10px;"><strong>記事清單：</strong></div>';
+                    notes.forEach((note, index) => {
+                        resultDiv.innerHTML += `<div class="note-item">
+                            <strong>${index + 1}. ${note.emoji || ''} ${note.title || '(無標題)'}</strong><br>
+                            <small>ID: ${note.id}</small><br>
+                            <small>內容: ${note.content.slice(0, 50)}...</small><br>
+                            <small>時間: ${new Date(note.updatedAt || note.createdAt).toLocaleString()}</small>
+                        </div>`;
+                    });
+                } else {
+                    resultDiv.innerHTML += '<span class="info">ℹ️ 目前沒有記事</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 模擬失敗: ${error.message}</span>`;
+                console.error('模擬錯誤:', error);
+            }
+        }
+
+        async function checkAuth() {
+            const resultDiv = document.getElementById('authResult');
+            try {
+                const response = await fetch('/api/me');
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<span class="success">✅ 已登入: ${data.user?.name || '未知使用者'}</span>`;
+                } else {
+                    resultDiv.innerHTML = `<span class="info">ℹ️ 未登入 (狀態: ${response.status})</span>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 認證檢查失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function loadNotes() {
+            await renderNotes();
+        }
+
+        // 頁面載入時自動測試
+        window.onload = function() {
+            checkAPI();
+            checkAuth();
+            loadNotes();
+        };
+    </script>
+</body>
+</html>

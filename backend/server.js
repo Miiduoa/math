@@ -3836,7 +3836,8 @@ const server = http.createServer(async (req, res) => {
 
   // Notes CRUD
   if(reqPath==='/api/notes' && req.method==='GET'){
-    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const user = getUserFromRequest(req);
+    const uid = user?.id || 'anonymous';
     if(isDbEnabled()){
       const rows = await pgdb.getNotes(uid);
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
@@ -3847,7 +3848,8 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(reqPath==='/api/notes' && req.method==='POST'){
-    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const user = getUserFromRequest(req);
+    const uid = user?.id || 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const payload = {
       title: String(body.title||'').slice(0,120),
@@ -3874,7 +3876,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='PUT'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const patch = {
       title: String((body.title||'')||'').slice(0,120),
@@ -3903,7 +3905,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='DELETE'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
     if(isDbEnabled()){
       await pgdb.deleteNote(uid, id);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
@@ -3915,7 +3917,8 @@ const server = http.createServer(async (req, res) => {
 
   // Reminders CRUD
   if(reqPath==='/api/reminders' && req.method==='GET'){
-    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const user = getUserFromRequest(req);
+    const uid = user?.id || 'anonymous';
     if(isDbEnabled()){
       const rows = await pgdb.getReminders(uid);
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
@@ -3926,7 +3929,8 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(reqPath==='/api/reminders' && req.method==='POST'){
-    const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
+    const user = getUserFromRequest(req);
+    const uid = user?.id || 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const payload = {
       title: String(body.title||'').slice(0,160),
@@ -3955,7 +3959,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='PUT'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const patch = {
       title: String((body.title||'')||'').slice(0,160),
@@ -3986,7 +3990,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='DELETE'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
     if(isDbEnabled()){
       await pgdb.deleteReminder(uid, id);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
