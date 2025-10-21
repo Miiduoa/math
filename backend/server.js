@@ -2132,8 +2132,23 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
       }catch(err){
-        // Graceful fallback: return heuristic reply to avoid前端壞掉
+        // Graceful fallback：struct 模式回傳本地解析；chat 模式回傳離線建議
         try{
+          if(mode==='struct'){
+            const rawText = String(messages?.[0]?.content||'');
+            const local = parseNlpQuick(rawText);
+            const parsed = validateAndNormalizeStruct({
+              type: local.type||'expense',
+              amount: Number.isFinite(Number(local.amount)) ? Number(local.amount) : undefined,
+              currency: local.currency || 'TWD',
+              date: local.date || undefined,
+              claimAmount: Number.isFinite(Number(local.claimAmount)) ? Number(local.claimAmount) : undefined,
+              claimed: typeof local.claimed==='boolean' ? local.claimed : undefined,
+              note: rawText
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ ok:true, provider:'fallback', parsed, error:'ai_provider', detail:String(err?.message||err) }));
+          }
           const fb = heuristicReply(messages, context) || '（AI 暫時不可用，已回覆離線建議）';
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           return res.end(JSON.stringify({ ok:true, provider:'fallback', reply: fb, error:'ai_provider', detail:String(err?.message||err) }));
