@@ -725,12 +725,13 @@ function menuFlexBubble({ baseUrl='' }){
     ],
     [
       { label:'未請款', text:'未請款', style:'secondary' },
-      { label:'分類支出', text:'分類支出', style:'secondary' }
+      { label:'分類排行', text:'分類排行', style:'secondary' }
     ],
     [
       { label:'統計摘要', text:'統計摘要', style:'secondary' },
-      { label:'月曆', text:'月曆', style:'secondary' }
+      { label:'預算差額', text:'預算差額', style:'secondary' }
     ],
+    [ { label:'月報', text:'月報', style:'secondary' }, { label:'月曆', text:'月曆', style:'secondary' } ],
     // AI 與批次
     [
       { label:'AI 助理', text:'AI', style:'secondary' },
@@ -2765,6 +2766,35 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Reports: monthly HTML (for LINE link)
+    if (req.method === 'GET' && reqPath === '/reports/monthly'){
+      const urlObj = new URL(req.url||'/', `http://${req.headers.host}`);
+      const ym = (urlObj.searchParams.get('ym')||'').slice(0,7) || new Date().toISOString().slice(0,7);
+      const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
+      try{
+        const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid));
+        const catName=(id)=> (cats.find(c=>c.id===id)?.name)||id;
+        const rows = (await (isDbEnabled()? pgdb.getTransactions(uid) : fileStore.getTransactions(uid))).filter(t=> String(t.date||'').slice(0,7)===ym);
+        const toB = (t)=>{ const r=Number(t.rate)||1; const cur=String(t.currency||'TWD'); const amt=Number(t.amount)||0; return cur==='TWD'? amt : (amt*r); };
+        const income = rows.filter(t=>t.type==='income').reduce((s,t)=> s+toB(t),0);
+        const expense = rows.filter(t=>t.type==='expense').reduce((s,t)=> s+toB(t),0);
+        const net = income-expense;
+        const byCat = new Map();
+        for(const t of rows){ if(t.type!=='expense') continue; byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+toB(t)); }
+        const ranking = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([id,v])=>({ id, name:catName(id), amountTWD:v }));
+        const fmt = (n)=> new Intl.NumberFormat(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}).format(n);
+        const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${ym} 月報</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:0;padding:16px;background:#f8fbff;color:#0f172a}h2{margin:0 0 12px}ol,ul{margin:8px 0 0 18px}</style></head><body><h2>${ym} 月報</h2><p>收入：$${fmt(income)}｜支出：$${fmt(expense)}｜結餘：$${fmt(net)}</p><h3>支出前五分類</h3><ol>${ranking.map(r=>`<li>${r.name} $${fmt(r.amountTWD)}</li>`).join('')}</ol><h3>最近 10 筆</h3><ul>${rows.slice(0,10).map(t=>`<li>${t.date}｜${catName(t.categoryId)}｜${t.type==='income'?'':'-'}$${fmt(toB(t))}｜${(t.note||'').replace(/[<>&]/g,'')}</li>`).join('')}</ul></body></html>`;
+        res.writeHead(200, { 'Content-Type':'text/html; charset=utf-8' });
+        return res.end(html);
+      }catch(err){
+        res.writeHead(500, { 'Content-Type':'text/plain; charset=utf-8' });
+        return res.end('生成失敗');
+      }
+    }
+
     const isLineWebhookPath = (normPath === '/line/webhook' || normPath.startsWith('/line/webhook/'));
     // Some platforms (and LINE verify button) may send a GET to verify availability
     if (req.method === 'GET' && isLineWebhookPath){
@@ -3640,8 +3670,8 @@ const server = http.createServer(async (req, res) => {
               continue;
             }
 
-            // 未請款（前 10 筆）
-            if(/未請款/.test(text)){
+          // 未請款（前 10 筆）
+          if(/未請款/.test(text)){
               if(isDbEnabled()){
                 const txs = await pgdb.getTransactions(userId);
                 const cats = await pgdb.getCategories();
@@ -3660,6 +3690,53 @@ const server = http.createServer(async (req, res) => {
               const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'未請款清單', subtitle:`筆數：${items.length}（最多顯示 10 筆）`, lines, buttons:[ { style:'link', action:{ type:'message', label:'最近交易', text:'最近交易' } } ] });
               await lineReply(replyToken, [{ type:'flex', altText:'未請款清單', contents:bubble }]);
               }
+              continue;
+            }
+
+            // 預算差額（當月或指定月）
+            if(/預算/.test(text) || /差額/.test(text)){
+              const month = (text.match(/(\d{4}-\d{2})/)||[])[1] || new Date().toISOString().slice(0,7);
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              try{
+                const r = await callToolByName('budget_delta', { month }, uid);
+                if(r && r.ok){
+                  const fmt = (n)=> new Intl.NumberFormat(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}).format(n);
+                  const lines = [
+                    `月份：${r.month}`,
+                    `預算：$${fmt(r.budgetTWD)}`,
+                    `已花：$${fmt(r.spentTWD)}`,
+                    `差額：$${fmt(r.deltaTWD)}（${r.status==='under'?'未超支':'超支'}）`
+                  ];
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'預算差額', subtitle:'月度預算與差額', lines });
+                  await lineReply(replyToken, [{ type:'flex', altText:'預算差額', contents:bubble }]);
+                  continue;
+                }
+              }catch(_){ }
+            }
+
+            // 分類排行（支出前幾名）
+            if(/(分類|排行|前五|Top)/i.test(text)){
+              const month = (text.match(/(\d{4}-\d{2})/)||[])[1] || new Date().toISOString().slice(0,7);
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              try{
+                const r = await callToolByName('category_ranking', { month, type:'expense', top:10 }, uid);
+                if(r && r.ok){
+                  const fmt = (n)=> new Intl.NumberFormat(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}).format(n);
+                  const lines = (r.ranking||[]).map((row,idx)=> `${idx+1}. ${row.categoryName} $${fmt(row.amountTWD)}`);
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'分類排行', subtitle:`${month} 支出`, lines: lines.length?lines:['目前沒有資料'] });
+                  await lineReply(replyToken, [{ type:'flex', altText:'分類排行', contents:bubble }]);
+                  continue;
+                }
+              }catch(_){ }
+            }
+
+            // 月報（產生報告連結）
+            if(/月報/.test(text)){
+              const month = (text.match(/(\d{4}-\d{2})/)||[])[1] || new Date().toISOString().slice(0,7);
+              const base = getBaseUrl(req)||'';
+              const url = `${base.replace(/\/$/,'')}/reports/monthly?ym=${encodeURIComponent(month)}`;
+              const bubble = glassFlexBubble({ baseUrl:base, title:'月報已生成', subtitle:month, lines:[ '請按下方開啟月報（HTML）' ], buttons:[ { style:'link', action:{ type:'uri', label:'開啟月報', uri:url } } ] });
+              await lineReply(replyToken, [{ type:'flex', altText:'月報', contents:bubble }]);
               continue;
             }
 
