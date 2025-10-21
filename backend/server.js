@@ -338,10 +338,16 @@ function createSigned(value){
   return `${value}.${sig}`;
 }
 function verifySigned(signed){
-  const idx = (signed||'').lastIndexOf('.');
+  const raw = String(signed||'');
+  const idx = raw.lastIndexOf('.');
+  // 開發模式：若未設定 SESSION_SECRET，接受未簽名值（或取點號前的值）
+  if(!SESSION_SECRET){
+    if(!raw) return null;
+    return idx>0 ? raw.slice(0, idx) : raw;
+  }
   if(idx<=0) return null;
-  const value = signed.slice(0, idx);
-  const sig = signed.slice(idx+1);
+  const value = raw.slice(0, idx);
+  const sig = raw.slice(idx+1);
   const expect = sign(value);
   if(!sig || !expect) return null;
   try{
@@ -3838,12 +3844,13 @@ const server = http.createServer(async (req, res) => {
   if(reqPath==='/api/notes' && req.method==='GET'){
     const user = getUserFromRequest(req);
     const uid = user?.id || 'anonymous';
+    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' };
     if(isDbEnabled()){
       const rows = await pgdb.getNotes(uid);
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      res.writeHead(200, commonHeaders);
       return res.end(JSON.stringify(rows));
     } else {
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      res.writeHead(200, commonHeaders);
       return res.end(JSON.stringify(getNotes(uid)));
     }
   }
