@@ -1826,7 +1826,7 @@
     showTab(initial);
     moveIndicator(initial);
     // Initial render notes/reminders
-    try{ renderNotes(); renderReminders(); }catch(_){ }
+    try{ await renderNotes(); await renderReminders(); }catch(_){ }
     // Quick jump
     $('#goNotesBtn')?.addEventListener('click', ()=>{
       document.getElementById('notesPanel')?.scrollIntoView({ behavior:'smooth', block:'start' });
