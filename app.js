@@ -203,7 +203,18 @@
 
   function bindEvents(){
     // Notes UI
-    async function fetchNotes(){ try{ const r=await fetch('/api/notes'); return await r.json(); }catch(_){ return []; } }
+    async function fetchNotes(){ 
+      try{ 
+        const r=await fetch('/api/notes'); 
+        if(!r.ok) { console.warn('fetchNotes failed:', r.status, r.statusText); return []; }
+        const data = await r.json();
+        console.log('fetchNotes result:', data.length, 'items');
+        return data;
+      }catch(err){ 
+        console.error('fetchNotes error:', err); 
+        return []; 
+      } 
+    }
     async function renderNotes(){
       const list = $('#notesList'); if(!list) return;
       const q = ($('#noteSearchInput')?.value||'').trim().toLowerCase();
@@ -263,7 +274,18 @@
     });
 
     // Reminders UI
-    async function fetchReminders(){ try{ const r=await fetch('/api/reminders'); return await r.json(); }catch(_){ return []; } }
+    async function fetchReminders(){ 
+      try{ 
+        const r=await fetch('/api/reminders'); 
+        if(!r.ok) { console.warn('fetchReminders failed:', r.status, r.statusText); return []; }
+        const data = await r.json();
+        console.log('fetchReminders result:', data.length, 'items');
+        return data;
+      }catch(err){ 
+        console.error('fetchReminders error:', err); 
+        return []; 
+      } 
+    }
     async function renderReminders(){
       const list = $('#remindersList'); if(!list) return;
       const rows = await fetchReminders();
@@ -1743,6 +1765,7 @@
         // 仍需登入，維持既有行為（顯示登入按鈕並停止初始化）
         return;
       }
+      // 允許匿名使用，繼續初始化
     }
     $('#txDate').value = today();
 
