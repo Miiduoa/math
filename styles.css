@@ -21,6 +21,9 @@
   --button-px:14px;
   --glass-blur:18px;
   --glass-sat:180%;
+  /* iOS-like motion curves */
+  --ios-ease-out: cubic-bezier(.22,.61,.36,1);
+  --ios-spring: cubic-bezier(.25,.46,.45,.94);
   --glass-highlight:rgba(255,255,255,0.65);
   --glass-innerline:rgba(255,255,255,0.25);
 }
@@ -77,13 +80,20 @@
   background:#000000;
   border-color:rgba(255,255,255,0.08);
 }
+/* Keep bottom tabs glassy even in OLED mode for better visual consistency on mobile */
+.theme-oled .tabs.bottom{
+  background:var(--glass-bg-strong);
+  backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));
+  -webkit-backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));
+}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";scroll-behavior:smooth;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-tap-highlight-color:transparent}
 @media (min-resolution: 120dpi), (min-resolution: 2dppx){
-  /* 提示有高更新率螢幕（類似 ProMotion）時，啟用更流暢的過渡時間參數 */
+  /* 高更新率螢幕（類 ProMotion）用更輕的過渡時間 */
   :root{ --motion-fast: .06s; --motion: .16s; --motion-slow: .22s }
 }
 @media (max-resolution: 119dpi){ :root{ --motion-fast: .08s; --motion: .22s; --motion-slow: .28s } }
+@media (prefers-reduced-motion: reduce){ :root{ --motion-fast: 0.01ms; --motion: 0.01ms; --motion-slow: 0.01ms } }
 @supports (-webkit-overflow-scrolling: touch){ :root{ --motion: .18s } }
 .app-header h1{font-size:28px;font-weight:700;letter-spacing:-0.02em}
 .app-header,.app-footer{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--glass-border);background:var(--glass-bg-strong);backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(var(--glass-blur));box-shadow:var(--shadow);position:relative}
@@ -202,12 +212,14 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
 .advanced-on .adv{display:flex}
 
 .tabs{display:flex;gap:8px;margin-bottom:8px}
-.tabs{display:inline-flex;align-items:center;border:1px solid var(--glass-border);background:var(--glass-bg-strong);border-radius:9999px;padding:4px;gap:4px;backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));position:relative;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scroll-snap-type:x mandatory}
+.tabs{display:inline-flex;align-items:center;border:1px solid var(--glass-border);background:var(--glass-bg-strong);border-radius:9999px;padding:4px;gap:4px;backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));-webkit-backdrop-filter:saturate(var(--glass-sat)) blur(calc(var(--glass-blur) - 6px));position:relative;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scroll-snap-type:x mandatory;background-clip:padding-box;will-change:transform,filter;transform:translateZ(0)}
 .tabs::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--glass-highlight),transparent 40%);opacity:.28}
 .tabs::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 1px 0 var(--glass-innerline)}
-.tabs .indicator{position:absolute;top:4px;bottom:4px;width:calc(25% - 8px); /* 將被 JS 覆寫為實際按鈕寬度 */ background:rgba(255,255,255,0.55);border:1px solid var(--glass-border);border-radius:9999px;transition:transform var(--motion, .18s) ease, width var(--motion, .18s) ease;will-change:transform,width;box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 4px 12px rgba(14,165,233,0.16);pointer-events:none}
+.tabs .indicator{position:absolute;top:4px;bottom:4px;width:calc(25% - 8px); /* 將被 JS 覆寫為實際按鈕寬度 */ background:rgba(255,255,255,0.55);border:1px solid var(--glass-border);border-radius:9999px;transition:transform var(--motion, .18s) var(--ios-ease-out), width var(--motion, .18s) var(--ios-ease-out);will-change:transform,width;box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 4px 12px rgba(14,165,233,0.16);pointer-events:none}
 .tab-btn{background:transparent;border:0;border-radius:9999px;padding:10px 14px;cursor:pointer;color:var(--text);height:42px;min-width:76px;font-weight:600;flex:0 0 auto;scroll-snap-align:center}
-.tab-btn.active{background:rgba(255,255,255,0.9);border:1px solid var(--glass-border);box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 6px 16px rgba(14,165,233,0.18);color:#0b4a6f;transition:background var(--motion, .18s) ease, color var(--motion, .18s) ease}
+.tab-btn{transition:transform var(--motion-fast, .06s) var(--ios-spring), background var(--motion, .18s) var(--ios-ease-out), color var(--motion, .18s) var(--ios-ease-out)}
+.tab-btn:active{transform:scale(.98)}
+.tab-btn.active{background:rgba(255,255,255,0.9);border:1px solid var(--glass-border);box-shadow:inset 0 0 0 0.5px rgba(255,255,255,0.6), 0 6px 16px rgba(14,165,233,0.18);color:#0b4a6f;transition:background var(--motion, .18s) var(--ios-ease-out), color var(--motion, .18s) var(--ios-ease-out)}
 
 /* Import label styled as button */
 .import-label span{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,0.6);color:var(--text);border:1px solid var(--glass-border);border-radius:12px;padding:8px 12px;cursor:pointer;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
@@ -231,6 +243,11 @@ dialog{border:1px solid var(--glass-border);background:var(--glass-bg-strong);co
 }
 @supports (padding: max(0px)){
   .tabs.bottom{ bottom: max(64px, env(safe-area-inset-bottom)); }
+}
+/* Fallback for browsers that don't support backdrop-filter (older Android/iOS) */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))){
+  .tabs{ background: rgba(255,255,255,0.92); }
+  .theme-dark .tabs, .theme-oled .tabs{ background: rgba(15,23,42,0.85); }
 }
 /* Ensure content not hidden by bottom tabs */
 main.container{ padding-bottom: calc(140px + env(safe-area-inset-bottom)); }
@@ -340,3 +357,12 @@ img,video{max-width:100%;height:auto}
   .tabs.bottom{bottom:max(56px, env(safe-area-inset-bottom))}
   .fab{bottom:calc(96px + env(safe-area-inset-bottom))}
 }
+
+/* Performance enhancements for long lists */
+.tx-list{ content-visibility:auto; contain-intrinsic-size: 600px 800px; will-change: transform; }
+.tx-item{ transition: transform var(--motion-fast, .06s) var(--ios-spring), background-color var(--motion, .18s) var(--ios-ease-out) }
+.tx-item:active{ transform:scale(.995) }
+
+/* Touch polish */
+button, .tab-btn{ touch-action: manipulation }
+::selection{ background: rgba(14,165,233,0.18) }

@@ -2138,8 +2138,8 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(out));
     }
 
-    // Serve static frontend (index.html, styles.css, app.js, db.js) from project root
-    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/index.html' || reqPath === '/styles.css' || reqPath === '/app.js' || reqPath === '/db.js' || reqPath === '/flex-glass.svg')) {
+    // Serve static frontend (index.html, styles.css, app.js, db.js, manifest, sw) from project root
+    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/index.html' || reqPath === '/styles.css' || reqPath === '/app.js' || reqPath === '/db.js' || reqPath === '/flex-glass.svg' || reqPath === '/manifest.webmanifest' || reqPath === '/sw.js')) {
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = path.dirname(__filename);
       const rootDir = path.resolve(__dirname, '..');
@@ -2150,6 +2150,7 @@ const server = http.createServer(async (req, res) => {
           : ext === '.css' ? 'text/css; charset=utf-8'
           : ext === '.js' ? 'application/javascript; charset=utf-8'
           : ext === '.svg' ? 'image/svg+xml; charset=utf-8'
+          : ext === '.webmanifest' ? 'application/manifest+json; charset=utf-8'
           : 'text/plain; charset=utf-8';
         const content = fs.readFileSync(filePath);
         res.writeHead(200, { 'Content-Type': mime });
