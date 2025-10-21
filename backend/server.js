@@ -1618,71 +1618,104 @@ async function callWithModelFallback(fn){
 
 async function aiResponsesText(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    // fallback to local /api/ai aggregator
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input: String(userText||'') });
     return { ok:true, output: String(resp?.output_text||'') };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesVision(text, imageUrl){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(text||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input:[ { role:'user', content:[ { type:'input_text', text: String(text||'') }, { type:'input_image', image_url: String(imageUrl||'') } ] } ] });
     return { ok:true, output: String(resp?.output_text||'') };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(text||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesWebSearch(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, tools:[ { type:'web_search' } ], input: String(userText||'') });
     return { ok:true, output: String(resp?.output_text||'') };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesFileSearch(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const vectorStoreId = process.env.VECTOR_STORE_ID || '';
   if(!vectorStoreId){ return { ok:false, output:'', error:'no_vector_store' }; }
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input:String(userText||''), tools:[ { type:'file_search', vector_store_ids:[ vectorStoreId ] } ] });
     return { ok:true, output: String(resp?.output_text||'') };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesFunctionTool(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const tools = [ { type:'function', name:'get_weather', description:'Get current temperature for a given location.', parameters:{ type:'object', properties:{ location:{ type:'string', description:'City and country e.g. Bogotá, Colombia' } }, required:['location'], additionalProperties:false }, strict:true } ];
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, input:[ { role:'user', content:String(userText||'') } ], tools });
     const out = String((resp?.output?.[0] && resp.output[0].to_json && resp.output[0].to_json()) || resp?.output_text || '');
     return { ok:true, output: out };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesMcp(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const r = await callWithModelFallback(async (model)=>{
     const resp = await client.responses.create({ model, tools:[ { type:'mcp', server_label:'dmcp', server_description:'A Dungeons and Dragons MCP server to assist with dice rolling.', server_url:'https://dmcp-server.deno.dev/sse', require_approval:'never' } ], input:String(userText||'') });
     return { ok:true, output: String(resp?.output_text||'') };
   });
+  if(!r.ok || !r.output){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ }
+  }
   return r;
 }
 
 async function aiResponsesStreamOnce(userText){
   const client = getOpenAIClient();
-  if(!client) return { ok:false, output:'', error:'no_api_key' };
+  if(!client){
+    try{ const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(userText||'') }], mode:'chat' }) }, 12000); return { ok:true, output:String(j?.reply||'') }; }catch(_){ return { ok:false, output:'', error:'no_api_key' }; }
+  }
   const primary = process.env.OPENAI_RESP_MODEL || 'gpt-5';
   const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
   async function run(model){
@@ -4188,11 +4221,18 @@ const server = http.createServer(async (req, res) => {
               await lineReply(replyToken, [{ type:'flex', altText:'記帳完成', contents:bubble }]);
               continue;
             }
-            // Fallback: chat with AI
+            // Fallback: chat with AI（改用同一套工具/檢索管線）
             {
               const ctx = { transactions: await (isDbEnabled()? pgdb.getTransactions(userId) : fileStore.getTransactions(userId||'anonymous')), categories: await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(userId||'anonymous')), settings: await (isDbEnabled()? pgdb.getSettings(userId) : fileStore.getSettings?.(userId||'anonymous')) };
-              const replyText = await aiChatText(text, ctx);
-              await lineReply(replyToken, [{ type:'text', text: String(replyText||'') }]);
+              try{
+                const aiUrl = `http://127.0.0.1:${PORT}/api/ai`;
+                const data = await fetchJson(aiUrl, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ messages:[{ role:'user', content:text }], context: ctx, mode:'chat' }) }, 20000);
+                const replyText = data?.reply || '';
+                await lineReply(replyToken, [{ type:'text', text: String(replyText||'') }]);
+              }catch(_){
+                const replyText = heuristicReply([{ role:'user', content:text }], ctx) || '（AI 暫時不可用）';
+                await lineReply(replyToken, [{ type:'text', text: String(replyText||'') }]);
+              }
             }
           }
         }catch(err){ try{ console.error('line handle error', err); }catch(_){ } }
