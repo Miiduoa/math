@@ -3926,12 +3926,13 @@ const server = http.createServer(async (req, res) => {
   if(reqPath==='/api/reminders' && req.method==='GET'){
     const user = getUserFromRequest(req);
     const uid = user?.id || 'anonymous';
+    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' };
     if(isDbEnabled()){
       const rows = await pgdb.getReminders(uid);
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      res.writeHead(200, commonHeaders);
       return res.end(JSON.stringify(rows));
     } else {
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      res.writeHead(200, commonHeaders);
       return res.end(JSON.stringify(getReminders(uid)));
     }
   }
