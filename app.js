@@ -216,7 +216,12 @@
       } 
     }
     async function renderNotes(){
-      const list = $('#notesList'); if(!list) return;
+      const list = $('#notesList'); 
+      if(!list) { 
+        console.warn('renderNotes: #notesList not found'); 
+        return; 
+      }
+      console.log('renderNotes: found #notesList, rendering...');
       const q = ($('#noteSearchInput')?.value||'').trim().toLowerCase();
       const rows = await fetchNotes();
       const filtered = q ? rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)) : rows;
@@ -287,7 +292,12 @@
       } 
     }
     async function renderReminders(){
-      const list = $('#remindersList'); if(!list) return;
+      const list = $('#remindersList'); 
+      if(!list) { 
+        console.warn('renderReminders: #remindersList not found'); 
+        return; 
+      }
+      console.log('renderReminders: found #remindersList, rendering...');
       const rows = await fetchReminders();
       list.innerHTML = rows.map(r=> `<li class="tx-item" data-id="${r.id}">
         <div>
@@ -1848,8 +1858,20 @@
     const initial = ['ledger','stats','calendar','assistant','notes','reminders'].includes(hashTab) ? hashTab : 'ledger';
     showTab(initial);
     moveIndicator(initial);
-    // Initial render notes/reminders
-    try{ await renderNotes(); await renderReminders(); }catch(_){ }
+    // Initial render notes/reminders (ensure DOM is visible first)
+    try{ 
+      // Temporarily show notes/reminders tabs to ensure DOM elements are available
+      const notesTab = document.querySelector('[data-tab="notes"]');
+      const remindersTab = document.querySelector('[data-tab="reminders"]');
+      if(notesTab) notesTab.classList.remove('hidden');
+      if(remindersTab) remindersTab.classList.remove('hidden');
+      
+      await renderNotes(); 
+      await renderReminders(); 
+      
+      // Restore original tab visibility
+      showTab(initial);
+    }catch(_){ }
     // Quick jump
     $('#goNotesBtn')?.addEventListener('click', ()=>{
       document.getElementById('notesPanel')?.scrollIntoView({ behavior:'smooth', block:'start' });
