@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isDbEnabled, db as pgdb } from './db.js';
+import { isDbEnabled, db as pgdb, upsertNoteEmbedding, upsertTxEmbedding, listNoteEmbeddings, listTxEmbeddings } from './db.js';
 
 // Load local env variables from .env.local (if exists, non-production convenience)
 try{
@@ -53,6 +53,9 @@ const MODEL_TRAIN_ON_START = String(process.env.MODEL_TRAIN_ON_START||'true').to
 const MODEL_TRAIN_USE_AI = String(process.env.MODEL_TRAIN_USE_AI||'true').toLowerCase()==='true';
 const MODEL_TRAIN_AI_MAX_PER_CYCLE = Number(process.env.MODEL_TRAIN_AI_MAX_PER_CYCLE || 20);
 const MODEL_TRAIN_RECENT_DAYS = Number(process.env.MODEL_TRAIN_RECENT_DAYS || 7);
+// AI config (embeddings & tools)
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+const AI_TOOLS_ENABLED = String(process.env.AI_TOOLS_ENABLED||'true').toLowerCase()==='true';
 
 // In-memory store (demo only)
 const store = {
@@ -146,6 +149,92 @@ const fileStore = {
   exportAll(userId){ return { categories:this.getCategories(userId), transactions:this.getTransactions(userId), settings:this.getSettings(userId), model: readJson(path.join(userDirFor(userId),'model.json'), []) }; },
   importAll(userId, data){ if(!data||!Array.isArray(data.categories)||!Array.isArray(data.transactions)) return false; const dir=userDirFor(userId); writeJson(path.join(dir,'categories.json'), data.categories); writeJson(path.join(dir,'transactions.json'), data.transactions); if(data.settings){ writeJson(path.join(dir,'settings.json'), { key:'app', ...data.settings }); } if(Array.isArray(data.model)){ writeJson(path.join(dir,'model.json'), data.model); } return true; }
 };
+
+// Simple vector store for file mode
+function vectorsPath(userId){ return path.join(userDirFor(userId), 'vectors.json'); }
+function getVectorsFile(userId){ const v = readJson(vectorsPath(userId), null); return v && typeof v==='object' ? v : { notes:{}, txs:{} }; }
+function setVectorsFile(userId, data){ return writeJson(vectorsPath(userId), data); }
+function setNoteEmbeddingFile(userId, id, emb){ const v=getVectorsFile(userId); v.notes= v.notes||{}; v.notes[id]=emb; setVectorsFile(userId,v); }
+function setTxEmbeddingFile(userId, id, emb){ const v=getVectorsFile(userId); v.txs= v.txs||{}; v.txs[id]=emb; setVectorsFile(userId,v); }
+function deleteNoteEmbeddingFile(userId, id){ const v=getVectorsFile(userId); if(v.notes){ delete v.notes[id]; } setVectorsFile(userId,v); }
+function deleteTxEmbeddingFile(userId, id){ const v=getVectorsFile(userId); if(v.txs){ delete v.txs[id]; } setVectorsFile(userId,v); }
+function listNoteEmbeddingsFile(userId){ const v=getVectorsFile(userId); return Object.entries(v.notes||{}).map(([id,embedding])=>({id, embedding})); }
+function listTxEmbeddingsFile(userId){ const v=getVectorsFile(userId); return Object.entries(v.txs||{}).map(([id,embedding])=>({id, embedding})); }
+
+// Embedding helpers
+function getOpenAIBase(){ const base=(process.env.OPENAI_BASE_URL||'https://api.openai.com/v1').replace(/\/+$/,''); return /\/v\d+(?:$|\/)/.test(base)? base: `${base}/v1`; }
+async function createEmbedding(input){
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+  const base = getOpenAIBase();
+  if(!OPENAI_API_KEY){
+    // Fallback: cheap hashed embedding (deterministic) 384 dims
+    const dim = 384; const vec = new Array(dim).fill(0);
+    const s = String(input||'');
+    for(let i=0;i<s.length;i++){
+      const cp = s.codePointAt(i)||0; const j = (cp * 2654435761 % dim) >>> 0; vec[j] += 1;
+      if(cp>0xffff) i++; // skip surrogate pair
+    }
+    const norm = Math.sqrt(vec.reduce((a,b)=>a+b*b,0))||1; return vec.map(x=> x/norm);
+  }
+  try{
+    const r = await fetchJson(`${base}/embeddings`,{
+      method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ model: EMBEDDING_MODEL, input: String(input||'') })
+    }, 20000);
+    const emb = r?.data?.[0]?.embedding; if(Array.isArray(emb)) return emb;
+  }catch(_){ /* ignore */ }
+  // Fallback hashed embedding if provider lacks embeddings
+  const dim = 384; const vec = new Array(dim).fill(0);
+  const s = String(input||'');
+  for(let i=0;i<s.length;i++){
+    const cp = s.codePointAt(i)||0;
+    const idx = Math.abs(((cp * 1103515245) + 12345) | 0) % dim;
+    vec[idx] += 1;
+    if(cp>0xffff) i++; // surrogate pair
+  }
+  const norm = Math.sqrt(vec.reduce((a,b)=>a+b*b,0))||1; return vec.map(x=> x/norm);
+}
+function cosine(a,b){ let s=0,na=0,nb=0; const n=Math.min(a.length,b.length); for(let i=0;i<n;i++){ const x=a[i]||0, y=b[i]||0; s+=x*y; na+=x*x; nb+=y*y; } const d=(Math.sqrt(na)||1)*(Math.sqrt(nb)||1); return s/d; }
+async function upsertNoteVector(userId, note){
+  try{
+    const text = `${note.title||''} ${note.content||''} ${(note.tags||[]).join(' ')}`.trim();
+    if(!text) return false;
+    const emb = await createEmbedding(text);
+    if(isDbEnabled()) await upsertNoteEmbedding(userId, note.id, emb); else setNoteEmbeddingFile(userId, note.id, emb);
+    return true;
+  }catch(_){ return false; }
+}
+async function upsertTxVector(userId, tx, cats){
+  try{
+    const catName = (id)=> (cats?.find(c=>c.id===id)?.name) || tx.categoryName || tx.categoryId || '';
+    const text = `${tx.type||''} ${tx.amount||0} ${tx.currency||'TWD'} ${catName(tx.categoryId)} ${tx.note||''}`.trim();
+    if(!text) return false;
+    const emb = await createEmbedding(text);
+    if(isDbEnabled()) await upsertTxEmbedding(userId, tx.id, emb); else setTxEmbeddingFile(userId, tx.id, emb);
+    return true;
+  }catch(_){ return false; }
+}
+async function retrieveByVector(userId, query, topKNotes=8, topKTx=10){
+  const q = String(query||'').trim(); if(!q) return { notes:[], txs:[] };
+  const qv = await createEmbedding(q);
+  let noteVecs = [], txVecs = [];
+  try{ noteVecs = isDbEnabled()? await listNoteEmbeddings(userId) : listNoteEmbeddingsFile(userId); }catch(_){ noteVecs=[]; }
+  try{ txVecs = isDbEnabled()? await listTxEmbeddings(userId) : listTxEmbeddingsFile(userId); }catch(_){ txVecs=[]; }
+  const topNotes = noteVecs.map(r=>({ id:r.id, sc: cosine(qv, r.embedding||[]) }))
+    .filter(x=> Number.isFinite(x.sc)).sort((a,b)=> b.sc-a.sc).slice(0, topKNotes);
+  const topTx = txVecs.map(r=>({ id:r.id, sc: cosine(qv, r.embedding||[]) }))
+    .filter(x=> Number.isFinite(x.sc)).sort((a,b)=> b.sc-a.sc).slice(0, topKTx);
+  // load full records for context
+  let notes=[], txs=[];
+  try{ notes = await (isDbEnabled()? pgdb.getNotes(userId) : getNotes(userId)); }catch(_){ notes=[]; }
+  try{ txs = await (isDbEnabled()? pgdb.getTransactions(userId) : fileStore.getTransactions(userId)); }catch(_){ txs=[]; }
+  const byId = (arr)=>{ const m=new Map(arr.map(x=>[x.id,x])); return (id)=> m.get(id); };
+  const pickNote = byId(notes), pickTx = byId(txs);
+  return {
+    notes: topNotes.map(x=> pickNote(x.id)).filter(Boolean),
+    txs: topTx.map(x=> pickTx(x.id)).filter(Boolean)
+  };
+}
 
 // Notes & Reminders (file-based)
 function safeId(){ try{ return crypto.randomUUID(); }catch(_){ return String(Date.now())+Math.random().toString(16).slice(2); } }
@@ -297,6 +386,119 @@ function startModelTrainer(){
   if(Number.isFinite(MODEL_TRAIN_INTERVAL_MS) && MODEL_TRAIN_INTERVAL_MS>0){
     setInterval(()=>{ try{ backfillAllUsers(); }catch(_){ } }, MODEL_TRAIN_INTERVAL_MS);
   }
+}
+
+// AI Tools (function-calling) specifications and handlers
+function buildToolsSpec(){
+  if(!AI_TOOLS_ENABLED) return [];
+  return [
+    { type:'function', function:{ name:'get_transactions', description:'查詢交易清單', parameters:{ type:'object', properties:{ since:{type:'string', description:'起始日期 YYYY-MM-DD'}, until:{type:'string', description:'結束日期 YYYY-MM-DD'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, top:{type:'number'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'add_transaction', description:'新增一筆交易', parameters:{ type:'object', properties:{ date:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, currency:{type:'string'}, rate:{type:'number'}, amount:{type:'number'}, claimAmount:{type:'number'}, claimed:{type:'boolean'}, emotion:{type:'string'}, motivation:{type:'string'}, note:{type:'string'} }, required:['date','type','categoryId','amount'], additionalProperties:false } } },
+    { type:'function', function:{ name:'get_notes', description:'查詢記事', parameters:{ type:'object', properties:{ q:{type:'string'}, top:{type:'number'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'add_note', description:'新增記事', parameters:{ type:'object', properties:{ title:{type:'string'}, content:{type:'string'}, tags:{type:'array', items:{type:'string'}}, emoji:{type:'string'}, color:{type:'string'}, pinned:{type:'boolean'} }, required:['content'], additionalProperties:false } } },
+    { type:'function', function:{ name:'get_stats', description:'取得統計（收入/支出/結餘、未請款、分類排名）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM（優先）'}, since:{type:'string'}, until:{type:'string'}, mode:{type:'string', enum:['range','month'], description:'預設自動'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'budget_delta', description:'計算本月或指定月份與預算差額（TWD）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM；空則當月'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'category_ranking', description:'各分類排行', parameters:{ type:'object', properties:{ month:{type:'string'}, since:{type:'string'}, until:{type:'string'}, type:{type:'string', enum:['expense','income'], description:'預設 expense'}, top:{type:'number'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'quick_report', description:'輸出快速月報（HTML 與摘要）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM；空則當月'} }, additionalProperties:false } } }
+  ];
+}
+async function callToolByName(name, args, uid){
+  try{
+    // helpers
+    const toBase = (t)=>{ const r=Number(t.rate)||1; const cur=String(t.currency||'TWD'); const amt=Number(t.amount)||0; return cur==='TWD'? amt : (amt*r); };
+    function ym(d){ try{ return String(d||'').slice(0,7); }catch(_){ return ''; } }
+    function inRange(t, since, until){ const d=String(t.date||''); if(since && d<since) return false; if(until && d>until) return false; return true; }
+    function filterByMonth(rows, month){ if(!month) return rows; return rows.filter(t=> ym(t.date)===month); }
+    async function loadTx(){ return await (isDbEnabled()? pgdb.getTransactions(uid) : fileStore.getTransactions(uid)); }
+    async function loadCats(){ return await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid)); }
+    async function loadSettings(){ return await (isDbEnabled()? pgdb.getSettings(uid) : fileStore.getSettings(uid)); }
+
+    if(name==='get_transactions'){
+      let rows = await (isDbEnabled()? pgdb.getTransactions(uid) : fileStore.getTransactions(uid));
+      if(args?.type){ rows = rows.filter(x=> x.type===args.type); }
+      if(args?.categoryId){ rows = rows.filter(x=> x.categoryId===args.categoryId); }
+      if(args?.since){ rows = rows.filter(x=> String(x.date||'') >= String(args.since)); }
+      if(args?.until){ rows = rows.filter(x=> String(x.date||'') <= String(args.until)); }
+      rows = rows.slice(0, Math.min(200, Number(args?.top)||50));
+      return { ok:true, rows };
+    }
+    if(name==='add_transaction'){
+      const rec = await (isDbEnabled()? pgdb.addTransaction(uid, args) : fileStore.addTransaction(uid, args));
+      // embed async
+      setTimeout(async ()=>{ try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid)); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
+      return { ok:true, transaction: rec };
+    }
+    if(name==='get_notes'){
+      let rows = await (isDbEnabled()? pgdb.getNotes(uid) : getNotes(uid));
+      if(args?.q){ const q=String(args.q).toLowerCase(); rows = rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)); }
+      rows = rows.slice(0, Math.min(200, Number(args?.top)||50));
+      return { ok:true, rows };
+    }
+    if(name==='add_note'){
+      const payload = { title: String(args.title||'').slice(0,120), content: String(args.content||'').slice(0,4000), tags: Array.isArray(args.tags)? args.tags.slice(0,20).map(x=>String(x).slice(0,24)):[], emoji:String(args.emoji||'').slice(0,4), color:String(args.color||'').slice(0,16), pinned: !!args.pinned, archived:false };
+      const rec = await (isDbEnabled()? pgdb.addNote(uid, payload) : (function(){ const rows=getNotes(uid); const rec={ id: safeId(), ...payload, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() }; rows.unshift(rec); setNotes(uid, rows); return rec; })());
+      setTimeout(()=>{ upsertNoteVector(uid, rec); }, 0);
+      return { ok:true, note: rec };
+    }
+    if(name==='get_stats'){
+      const month = String(args?.month||'').slice(0,7);
+      const since = String(args?.since||'')||null;
+      const until = String(args?.until||'')||null;
+      let rows = await loadTx();
+      if(month){ rows = filterByMonth(rows, month); }
+      if(since||until){ rows = rows.filter(t=> inRange(t, since, until)); }
+      const income = rows.filter(t=>t.type==='income').reduce((s,t)=> s+toBase(t),0);
+      const expense = rows.filter(t=>t.type==='expense').reduce((s,t)=> s+toBase(t),0);
+      const net = income-expense;
+      const unclaimed = rows.filter(t=> t.type==='expense' && t.claimed !== true);
+      const unclaimedSum = unclaimed.reduce((s,t)=> s+toBase(t),0);
+      const cats = await loadCats(); const catName=(id)=> (cats.find(c=>c.id===id)?.name)||id;
+      const byCat = new Map();
+      for(const t of rows){ if(t.type!=='expense') continue; const v=toBase(t); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
+      const ranking = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).map(([id,v])=>({ categoryId:id, categoryName:catName(id), amountTWD:v }));
+      return { ok:true, stats:{ incomeTWD:income, expenseTWD:expense, netTWD:net, unclaimedCount:unclaimed.length, unclaimedTWD:unclaimedSum, ranking } };
+    }
+    if(name==='budget_delta'){
+      const month = String(args?.month||'').slice(0,7) || (new Date().toISOString().slice(0,7));
+      const s = await loadSettings();
+      const budget = Number(s?.monthlyBudgetTWD)||0;
+      let rows = filterByMonth(await loadTx(), month).filter(t=> t.type==='expense');
+      const spent = rows.reduce((sum,t)=> sum+toBase(t),0);
+      const delta = budget - spent;
+      return { ok:true, month, budgetTWD:budget, spentTWD:spent, deltaTWD:delta, status: delta>=0 ? 'under' : 'over' };
+    }
+    if(name==='category_ranking'){
+      const month = String(args?.month||'').slice(0,7);
+      const since = String(args?.since||'')||null;
+      const until = String(args?.until||'')||null;
+      const type = ['income','expense'].includes(String(args?.type))? String(args.type) : 'expense';
+      const top = Math.min(50, Number(args?.top)||10);
+      let rows = await loadTx();
+      if(month){ rows = filterByMonth(rows, month); }
+      if(since||until){ rows = rows.filter(t=> inRange(t, since, until)); }
+      const cats = await loadCats(); const catName=(id)=> (cats.find(c=>c.id===id)?.name)||id;
+      const byCat = new Map();
+      for(const t of rows){ if(t.type!==type) continue; const v=toBase(t); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
+      const ranking = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,top).map(([id,v])=>({ categoryId:id, categoryName:catName(id), amountTWD:v }));
+      return { ok:true, type, month:month||null, ranking };
+    }
+    if(name==='quick_report'){
+      const month = String(args?.month||'').slice(0,7) || (new Date().toISOString().slice(0,7));
+      const cats = await loadCats(); const catName=(id)=> (cats.find(c=>c.id===id)?.name)||id;
+      const rows = (await loadTx()).filter(t=> ym(t.date)===month);
+      const toB = toBase;
+      const income = rows.filter(t=>t.type==='income').reduce((s,t)=> s+toB(t),0);
+      const expense = rows.filter(t=>t.type==='expense').reduce((s,t)=> s+toB(t),0);
+      const net = income-expense;
+      const byCat = new Map();
+      for(const t of rows){ if(t.type!=='expense') continue; byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+toB(t)); }
+      const ranking = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([id,v])=>({ id, name:catName(id), amountTWD:v }));
+      const fmt = (n)=> new Intl.NumberFormat(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}).format(n);
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>${month} 月報</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;padding:16px;line-height:1.5;color:#0f172a"><h2>${month} 月報</h2><p>收入：$${fmt(income)}｜支出：$${fmt(expense)}｜結餘：$${fmt(net)}</p><h3>支出前五分類</h3><ol>${ranking.map(r=>`<li>${r.name} $${fmt(r.amountTWD)}</li>`).join('')}</ol><h3>最近 10 筆</h3><ul>${rows.slice(0,10).map(t=>`<li>${t.date}｜${catName(t.categoryId)}｜${t.type==='income'?'':'-'}$${fmt(toB(t))}｜${(t.note||'').replace(/[<>&]/g,'')}</li>`).join('')}</ul></body></html>`;
+      return { ok:true, month, summary:{ incomeTWD:income, expenseTWD:expense, netTWD:net, topCategories:ranking }, html };
+    }
+  }catch(err){ return { ok:false, error:String(err?.message||err) }; }
+  return { ok:false, error:'unknown_tool' };
 }
 
 function b64url(input){
@@ -1779,7 +1981,8 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-      const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
       // Fallback: simple heuristic response if no key configured
       if (!OPENAI_API_KEY) {
@@ -1788,24 +1991,78 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ ok: true, provider: 'heuristic', reply }));
       }
 
+      // Lightweight retrieval to augment context with relevant items (notes/transactions)
+      async function buildRagAugment(){
+        try{
+          const q = String(messages?.[messages.length-1]?.content||'').toLowerCase();
+          if(!q) return { topTransactions:[], topNotes:[], categories:[] };
+          const user = getUserFromRequest(req);
+          let uid = user?.id || '';
+          if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+          if(!uid) uid = 'anonymous';
+          // load data
+          const cats = await (isDbEnabled() ? pgdb.getCategories() : fileStore.getCategories(uid));
+          let txs = await (isDbEnabled() ? pgdb.getTransactions(uid) : fileStore.getTransactions(uid));
+          let notes = [];
+          try{ notes = await (isDbEnabled() ? pgdb.getNotes(uid) : getNotes(uid)); }catch(_){ notes = []; }
+          // limit candidates (recent-first)
+          txs = Array.isArray(txs) ? txs.slice(0,400) : [];
+          notes = Array.isArray(notes) ? notes.slice(0,200) : [];
+          // simple scoring
+          function scoreText(txt){
+            const s = String(txt||'').toLowerCase();
+            if(!s || !q) return 0;
+            let sc = 0;
+            const parts = q.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+            for(const w of parts){ if(!w) continue; if(s.includes(w)) sc += w.length>=2 ? 2 : 1; }
+            // bonus for full substring
+            if(s.includes(q) && q.length>=4) sc += 3;
+            return sc;
+          }
+          const catName = (id)=> (cats.find(c=>c.id===id)?.name)||id;
+          const scoredTx = txs.map(t=>({ t, sc: scoreText(`${t.note||''} ${t.categoryName||catName(t.categoryId)||''} ${t.date||''}`) }))
+                              .filter(x=> x.sc>0).sort((a,b)=> b.sc-a.sc).slice(0,15)
+                              .map(x=>({ id:x.t.id, date:x.t.date, type:x.t.type, amount:x.t.amount, currency:x.t.currency||'TWD', category: catName(x.t.categoryId), note: x.t.note||'' }));
+          const scoredNotes = notes.map(n=>({ n, sc: scoreText(`${n.title||''} ${n.content||''}`) }))
+                                  .filter(x=> x.sc>0).sort((a,b)=> b.sc-a.sc).slice(0,12)
+                                  .map(x=>({ id:x.n.id, title:x.n.title||'', content: String(x.n.content||'').slice(0,240), tags:x.n.tags||[], updatedAt:x.n.updatedAt||x.n.createdAt }));
+          return { topTransactions:scoredTx, topNotes:scoredNotes, categories: cats };
+        }catch(_){ return { topTransactions:[], topNotes:[], categories:[] }; }
+      }
+
+      // Determine uid for retrieval
+      let uid = null; try{ const u = getUserFromRequest(req); uid = u?.id||null; }catch(_){ }
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
+      const lastText = String(messages?.[messages.length-1]?.content||'');
+      let vrag = { notes:[], txs:[] };
+      try{ if(lastText) vrag = await retrieveByVector(uid, lastText); }catch(_){ vrag = {notes:[], txs:[]}; }
+      const rag = await buildRagAugment();
+
       // Proxy to OpenAI-compatible API
       const payload = {
-        model: OPENAI_MODEL,
+        model: (mode==='struct') ? OPENAI_MODEL_STRUCT : OPENAI_MODEL_CHAT,
         messages: (mode==='struct') ? [
           { role: 'system', content: `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD；若為 MM/DD 則年份取今年；支援 今天/昨天/前天/明天), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。金額可含中文數字。請優先從提供的分類清單選擇 categoryName，對不到可輸出新名稱，前端會自動建立。${Array.isArray(context?.categories)?'分類清單：'+context.categories.map(c=>c.name).join(', ').slice(0,800):''} 嚴禁將日期/時間/序數視為金額（例如：十月、十點、10:30、10/31、第三次）。若不確定金額，省略 amount 欄位，切勿臆測。只輸出 JSON，不要其他文字。` },
           { role: 'user', content: messages?.[0]?.content || '' }
         ] : [
           { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
           { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
+          { role: 'system', content: `Retrieved context (vector): ${JSON.stringify({ topTransactions:vrag.txs, topNotes:vrag.notes }).slice(0, 4000)}` },
+          { role: 'system', content: `Retrieved context (lexical): ${JSON.stringify(rag).slice(0, 3000)}` },
           ...messages
         ],
-        temperature: (mode==='struct') ? 0 : 0.4
+        temperature: (mode==='struct') ? 0 : 0.4,
+        max_tokens: (mode==='struct') ? 600 : 1000
       };
+      if(mode!=='struct'){
+        const tools = buildToolsSpec(); if(tools && tools.length>0){ payload.tools = tools; payload.tool_choice = 'auto'; }
+      }
       const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
       const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
       const endpoint = `${apiBase}/chat/completions`;
       try{
-        const data = await fetchJson(endpoint, {
+        let data = await fetchJson(endpoint, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
@@ -1813,7 +2070,23 @@ const server = http.createServer(async (req, res) => {
           },
           body: JSON.stringify(payload)
         }, 20000);
-        const reply = data?.choices?.[0]?.message?.content || '';
+        let message = data?.choices?.[0]?.message || {};
+        // Tool calling (one-pass)
+        if(AI_TOOLS_ENABLED && mode!=='struct' && message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length>0){
+          const toolCall = message.tool_calls[0];
+          const name = toolCall?.function?.name||'';
+          let args = {};
+          try{ args = JSON.parse(toolCall?.function?.arguments||'{}'); }catch(_){ args={}; }
+          const result = await callToolByName(name, args, uid);
+          const follow = {
+            model: OPENAI_MODEL_CHAT,
+            messages: [ ...payload.messages, { role:'assistant', tool_calls: [toolCall] }, { role:'tool', tool_call_id: toolCall.id, name, content: JSON.stringify(result) } ],
+            temperature: 0.4
+          };
+          data = await fetchJson(endpoint, { method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(follow) }, 20000);
+          message = data?.choices?.[0]?.message || message;
+        }
+        const reply = message?.content || '';
         // struct 模式：嘗試解析 JSON
         if(mode==='struct'){
           try{
@@ -1844,7 +2117,7 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-      const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
       // Prepare SSE response
       res.writeHead(200, {
@@ -1872,11 +2145,44 @@ const server = http.createServer(async (req, res) => {
         const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
         const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
         const endpoint = new URL(`${apiBase}/chat/completions`);
+        // Build lightweight retrieval for streaming as well
+        async function buildRagForStream(){
+          try{
+            const q = String(messages?.[messages.length-1]?.content||'').toLowerCase();
+            if(!q) return { topTransactions:[], topNotes:[], categories:[] };
+            const user = getUserFromRequest(req);
+            let uid = user?.id || '';
+            if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+            if(!uid) uid = 'anonymous';
+            const cats = await (isDbEnabled() ? pgdb.getCategories() : fileStore.getCategories(uid));
+            let txs = await (isDbEnabled() ? pgdb.getTransactions(uid) : fileStore.getTransactions(uid));
+            let notes = [];
+            try{ notes = await (isDbEnabled() ? pgdb.getNotes(uid) : getNotes(uid)); }catch(_){ notes = []; }
+            txs = Array.isArray(txs) ? txs.slice(0,400) : [];
+            notes = Array.isArray(notes) ? notes.slice(0,200) : [];
+            function scoreText(txt){
+              const s = String(txt||'').toLowerCase(); if(!s||!q) return 0; let sc=0; const parts=q.split(/[^\p{L}\p{N}]+/u).filter(Boolean); for(const w of parts){ if(!w) continue; if(s.includes(w)) sc += w.length>=2 ? 2 : 1; } if(s.includes(q) && q.length>=4) sc+=3; return sc;
+            }
+            const catName = (id)=> (cats.find(c=>c.id===id)?.name)||id;
+            const scoredTx = txs.map(t=>({ t, sc: scoreText(`${t.note||''} ${t.categoryName||catName(t.categoryId)||''} ${t.date||''}`) }))
+                                .filter(x=> x.sc>0).sort((a,b)=> b.sc-a.sc).slice(0,15)
+                                .map(x=>({ id:x.t.id, date:x.t.date, type:x.t.type, amount:x.t.amount, currency:x.t.currency||'TWD', category: catName(x.t.categoryId), note: x.t.note||'' }));
+            const scoredNotes = notes.map(n=>({ n, sc: scoreText(`${n.title||''} ${n.content||''}`) }))
+                                    .filter(x=> x.sc>0).sort((a,b)=> b.sc-a.sc).slice(0,12)
+                                    .map(x=>({ id:x.n.id, title:x.n.title||'', content: String(x.n.content||'').slice(0,240), tags:x.n.tags||[], updatedAt:x.n.updatedAt||x.n.createdAt }));
+            // also include vector retrieval
+            let vec = { notes:[], txs:[] };
+            try{ vec = await retrieveByVector(uid, q); }catch(_){ vec={notes:[], txs:[]}; }
+            return { topTransactions:scoredTx, topNotes:scoredNotes, categories: cats, vectorTop: { topTransactions: vec.txs, topNotes: vec.notes } };
+          }catch(_){ return { topTransactions:[], topNotes:[], categories:[] }; }
+        }
+        const ragStream = await buildRagForStream();
         const payload = {
-          model: OPENAI_MODEL,
+          model: OPENAI_MODEL_CHAT,
           messages: [
             { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
             { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
+            { role: 'system', content: `Retrieved context (top matches): ${JSON.stringify(ragStream).slice(0, 4000)}` },
             ...messages
           ],
           temperature: 0.4,
@@ -2125,6 +2431,14 @@ const server = http.createServer(async (req, res) => {
         const v = body.openaiModel;
         process.env.OPENAI_MODEL = (v==null) ? '' : String(v);
       }
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiModelChat')){
+        const v = body.openaiModelChat;
+        process.env.OPENAI_MODEL_CHAT = (v==null) ? '' : String(v);
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiModelStruct')){
+        const v = body.openaiModelStruct;
+        process.env.OPENAI_MODEL_STRUCT = (v==null) ? '' : String(v);
+      }
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
@@ -2132,6 +2446,8 @@ const server = http.createServer(async (req, res) => {
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         hasOpenAIKey,
         openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini',
+        openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini',
+        openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-4o-mini',
         openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1'
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
@@ -2235,10 +2551,12 @@ const server = http.createServer(async (req, res) => {
       if(!uid) uid = 'anonymous';
       if(isDbEnabled()){
         const rec = await pgdb.addTransaction(uid, payload);
+        setTimeout(async ()=>{ try{ const cats = await pgdb.getCategories(); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
         const rec = fileStore.addTransaction(uid, payload);
+        setTimeout(async ()=>{ try{ const cats = fileStore.getCategories(uid); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
@@ -2273,11 +2591,13 @@ const server = http.createServer(async (req, res) => {
       if(isDbEnabled()){
         const rec = await pgdb.updateTransaction(uid, id, patch);
         if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+        setTimeout(async ()=>{ try{ const cats = await pgdb.getCategories(); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
         const rec = fileStore.updateTransaction(uid, id, patch);
         if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+        setTimeout(async ()=>{ try{ const cats = fileStore.getCategories(uid); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
@@ -2294,7 +2614,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       } else {
-        const ok = fileStore.deleteTransaction(uid, id);
+        const ok = fileStore.deleteTransaction(uid, id); setTimeout(()=>{ deleteTxEmbeddingFile(uid, id); }, 0);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok }));
       }
@@ -3887,6 +4207,7 @@ const server = http.createServer(async (req, res) => {
     };
     if(isDbEnabled()){
       const rec = await pgdb.addNote(uid, payload);
+      setTimeout(()=>{ upsertNoteVector(uid, rec); }, 0);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
     } else {
       const rows = getNotes(uid);
@@ -3896,7 +4217,7 @@ const server = http.createServer(async (req, res) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
-      rows.unshift(rec); setNotes(uid, rows);
+      rows.unshift(rec); setNotes(uid, rows); setTimeout(()=>{ upsertNoteVector(uid, rec); }, 0);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
     }
   }
@@ -3919,6 +4240,7 @@ const server = http.createServer(async (req, res) => {
     if(isDbEnabled()){
       const next = await pgdb.updateNote(uid, id, patch);
       if(!next){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      setTimeout(()=>{ upsertNoteVector(uid, next); }, 0);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
     } else {
       const rows = getNotes(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
@@ -3927,7 +4249,7 @@ const server = http.createServer(async (req, res) => {
         ...patch,
         updatedAt: new Date().toISOString()
       };
-      rows[idx]=next; setNotes(uid, rows);
+      rows[idx]=next; setNotes(uid, rows); setTimeout(()=>{ upsertNoteVector(uid, next); }, 0);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
     }
   }
@@ -3939,7 +4261,7 @@ const server = http.createServer(async (req, res) => {
       await pgdb.deleteNote(uid, id);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
     } else {
-      const rows = getNotes(uid).filter(n=>n.id!==id); setNotes(uid, rows);
+      const rows = getNotes(uid).filter(n=>n.id!==id); setNotes(uid, rows); setTimeout(()=>{ deleteNoteEmbeddingFile(uid, id); }, 0);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
     }
   }

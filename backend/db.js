@@ -111,6 +111,21 @@ async function initSchema(pool){
     updated_at timestamptz not null default now()
   );
   create index if not exists idx_reminders_user on reminders(user_id);
+  -- embeddings tables (vector store without pgvector)
+  create table if not exists note_embeddings (
+    note_id text primary key,
+    user_id text,
+    embedding double precision[] not null,
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists idx_note_embeddings_user on note_embeddings(user_id);
+  create table if not exists tx_embeddings (
+    tx_id text primary key,
+    user_id text,
+    embedding double precision[] not null,
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists idx_tx_embeddings_user on tx_embeddings(user_id);
   `);
   // seed settings and default categories
   const res = await pool.query('select count(*)::int as c from categories');
@@ -260,6 +275,8 @@ export const db = {
   async deleteTransaction(userId, id){
     const p = await getPool();
     await p.query('delete from transactions where id=$1 and user_id=$2', [id, userId||null]);
+    // cleanup embedding if exists
+    try{ await p.query('delete from tx_embeddings where tx_id=$1 and user_id=$2', [id, userId||null]); }catch(_){ }
     return true;
   },
   async exportAll(userId){
@@ -472,8 +489,31 @@ export const db = {
   async deleteNote(userId, id){
     const p = await getPool();
     await p.query('delete from notes where id=$1 and user_id=$2', [id, userId||null]);
+    // cleanup embedding
+    try{ await p.query('delete from note_embeddings where note_id=$1 and user_id=$2', [id, userId||null]); }catch(_){ }
     return true;
   }
 };
 
+// Embeddings helpers for vector RAG (no pgvector required)
+export async function upsertNoteEmbedding(userId, noteId, embedding){
+  const p = await getPool();
+  await p.query('insert into note_embeddings(note_id,user_id,embedding,updated_at) values($1,$2,$3,now()) on conflict (note_id) do update set embedding=excluded.embedding, user_id=excluded.user_id, updated_at=now()', [noteId, userId||null, embedding]);
+  return true;
+}
+export async function upsertTxEmbedding(userId, txId, embedding){
+  const p = await getPool();
+  await p.query('insert into tx_embeddings(tx_id,user_id,embedding,updated_at) values($1,$2,$3,now()) on conflict (tx_id) do update set embedding=excluded.embedding, user_id=excluded.user_id, updated_at=now()', [txId, userId||null, embedding]);
+  return true;
+}
+export async function listNoteEmbeddings(userId){
+  const p = await getPool();
+  const r = await p.query('select note_id as id, embedding from note_embeddings where user_id=$1', [userId||null]);
+  return r.rows.map(row=> ({ id: row.id, embedding: row.embedding || [] }));
+}
+export async function listTxEmbeddings(userId){
+  const p = await getPool();
+  const r = await p.query('select tx_id as id, embedding from tx_embeddings where user_id=$1', [userId||null]);
+  return r.rows.map(row=> ({ id: row.id, embedding: row.embedding || [] }));
+}
 
