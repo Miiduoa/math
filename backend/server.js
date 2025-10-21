@@ -56,6 +56,10 @@ const MODEL_TRAIN_RECENT_DAYS = Number(process.env.MODEL_TRAIN_RECENT_DAYS || 7)
 // AI config (embeddings & tools)
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
 const AI_TOOLS_ENABLED = String(process.env.AI_TOOLS_ENABLED||'true').toLowerCase()==='true';
+// AI fallback chains (comma-separated). If unset, use sensible defaults per provider额度。
+const OPENAI_FALLBACK_CHAT = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
+const OPENAI_FALLBACK_STRUCT = (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean);
+const runtimeAiStatus = { lastError:null, lastErrorAt:0, lastModelChat:null, lastModelStruct:null };
 
 // In-memory store (demo only)
 const store = {
@@ -2041,7 +2045,7 @@ const server = http.createServer(async (req, res) => {
       const rag = await buildRagAugment();
 
       // Proxy to OpenAI-compatible API
-      const payload = {
+      const payloadBase = {
         model: (mode==='struct') ? OPENAI_MODEL_STRUCT : OPENAI_MODEL_CHAT,
         messages: (mode==='struct') ? [
           { role: 'system', content: `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD；若為 MM/DD 則年份取今年；支援 今天/昨天/前天/明天), categoryName(string), rate(number，可省略), claimAmount(number，可省略), claimed(boolean，可省略), note(string)。金額可含中文數字。請優先從提供的分類清單選擇 categoryName，對不到可輸出新名稱，前端會自動建立。${Array.isArray(context?.categories)?'分類清單：'+context.categories.map(c=>c.name).join(', ').slice(0,800):''} 嚴禁將日期/時間/序數視為金額（例如：十月、十點、10:30、10/31、第三次）。若不確定金額，省略 amount 欄位，切勿臆測。只輸出 JSON，不要其他文字。` },
@@ -2057,37 +2061,64 @@ const server = http.createServer(async (req, res) => {
         max_tokens: (mode==='struct') ? 600 : 1000
       };
       if(mode!=='struct'){
-        const tools = buildToolsSpec(); if(tools && tools.length>0){ payload.tools = tools; payload.tool_choice = 'auto'; }
+        const tools = buildToolsSpec(); if(tools && tools.length>0){ payloadBase.tools = tools; payloadBase.tool_choice = 'auto'; }
       }
       const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
       const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
       const endpoint = `${apiBase}/chat/completions`;
-      try{
-        let data = await fetchJson(endpoint, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
-        }, 20000);
-        let message = data?.choices?.[0]?.message || {};
-        // Tool calling (one-pass)
-        if(AI_TOOLS_ENABLED && mode!=='struct' && message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length>0){
-          const toolCall = message.tool_calls[0];
-          const name = toolCall?.function?.name||'';
-          let args = {};
-          try{ args = JSON.parse(toolCall?.function?.arguments||'{}'); }catch(_){ args={}; }
-          const result = await callToolByName(name, args, uid);
-          const follow = {
-            model: OPENAI_MODEL_CHAT,
-            messages: [ ...payload.messages, { role:'assistant', tool_calls: [toolCall] }, { role:'tool', tool_call_id: toolCall.id, name, content: JSON.stringify(result) } ],
-            temperature: 0.4
-          };
-          data = await fetchJson(endpoint, { method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(follow) }, 20000);
-          message = data?.choices?.[0]?.message || message;
+      function fallbackList(){
+        if(mode==='struct'){
+          const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-5-nano');
+          const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-nano', 'gpt-3.5-turbo'];
+          const l = OPENAI_FALLBACK_STRUCT.length? OPENAI_FALLBACK_STRUCT : defaults;
+          // ensure unique
+          return Array.from(new Set(l.filter(Boolean)));
+        }else{
+          const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini');
+          const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-mini', 'gpt-5-nano', 'gpt-3.5-turbo'];
+          const l = OPENAI_FALLBACK_CHAT.length? OPENAI_FALLBACK_CHAT : defaults;
+          return Array.from(new Set(l.filter(Boolean)));
         }
-        const reply = message?.content || '';
+      }
+      async function tryModelsWithTools(){
+        const models = fallbackList();
+        let lastErr = null;
+        for(const mdl of models){
+          const payload = { ...payloadBase, model: mdl };
+          try{
+            let data = await fetchJson(endpoint, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(payload)
+            }, 20000);
+            let message = data?.choices?.[0]?.message || {};
+            if(AI_TOOLS_ENABLED && mode!=='struct' && message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length>0){
+              const toolCall = message.tool_calls[0];
+              const name = toolCall?.function?.name||'';
+              let args = {};
+              try{ args = JSON.parse(toolCall?.function?.arguments||'{}'); }catch(_){ args={}; }
+              const result = await callToolByName(name, args, uid);
+              const follow = {
+                model: mdl,
+                messages: [ ...payload.messages, { role:'assistant', tool_calls: [toolCall] }, { role:'tool', tool_call_id: toolCall.id, name, content: JSON.stringify(result) } ],
+                temperature: payload.temperature
+              };
+              data = await fetchJson(endpoint, { method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(follow) }, 20000);
+              message = data?.choices?.[0]?.message || message;
+            }
+            if(mode==='struct') runtimeAiStatus.lastModelStruct = mdl; else runtimeAiStatus.lastModelChat = mdl;
+            return message?.content || '';
+          }catch(err){ lastErr = err; continue; }
+        }
+        runtimeAiStatus.lastError = String(lastErr?.message||lastErr||'unknown');
+        runtimeAiStatus.lastErrorAt = Date.now();
+        throw lastErr || new Error('all_models_failed');
+      }
+      try{
+        const reply = await tryModelsWithTools();
         // struct 模式：嘗試解析 JSON
         if(mode==='struct'){
           try{
@@ -2101,8 +2132,15 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));
       }catch(err){
-        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok:false, error:'ai_provider', detail: String(err?.message||err) }));
+        // Graceful fallback: return heuristic reply to avoid前端壞掉
+        try{
+          const fb = heuristicReply(messages, context) || '（AI 暫時不可用，已回覆離線建議）';
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ ok:true, provider:'fallback', reply: fb, error:'ai_provider', detail:String(err?.message||err) }));
+        }catch(_){
+          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ ok:false, error:'ai_provider', detail: String(err?.message||err) }));
+        }
       }
     }
 
@@ -2178,8 +2216,9 @@ const server = http.createServer(async (req, res) => {
           }catch(_){ return { topTransactions:[], topNotes:[], categories:[] }; }
         }
         const ragStream = await buildRagForStream();
-        const payload = {
-          model: OPENAI_MODEL_CHAT,
+        const tools = buildToolsSpec();
+        const makePayload = (model)=>({
+          model,
           messages: [
             { role: 'system', content: 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.' },
             { role: 'system', content: `Context JSON (may be partial): ${JSON.stringify(context).slice(0, 4000)}` },
@@ -2187,42 +2226,57 @@ const server = http.createServer(async (req, res) => {
             ...messages
           ],
           temperature: 0.4,
-          stream: true
-        };
-        const reqUp = https.request({
-          hostname: endpoint.hostname,
-          path: endpoint.pathname + endpoint.search,
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }, (resp)=>{
-          resp.setEncoding('utf8');
-          let buffer = '';
-          resp.on('data', (chunk)=>{
-            buffer += chunk;
-            const lines = buffer.split(/\n/);
-            buffer = lines.pop()||'';
-            for(const line of lines){
-              const trimmed = line.trim();
-              if(!trimmed) continue;
-              if(trimmed.startsWith('data:')){
-                const data = trimmed.slice(5).trim();
-                if(data === '[DONE]'){ sse({ done:true }); return; }
-                try{
-                  const json = JSON.parse(data);
-                  const delta = json?.choices?.[0]?.delta?.content || '';
-                  if(delta){ sse({ delta }); }
-                }catch(_){ /* ignore */ }
-              }
-            }
-          });
-          resp.on('end', ()=>{ try{ sse({ done:true }); }catch(_){ } });
+          stream: true,
+          ...(tools && tools.length>0 ? { tools, tool_choice:'auto' } : {})
         });
-        reqUp.on('error', ()=>{ try{ sse({ error:'upstream_error' }); }catch(_){ } });
-        reqUp.write(JSON.stringify(payload));
-        reqUp.end();
+        const models = (OPENAI_FALLBACK_CHAT.length? OPENAI_FALLBACK_CHAT : [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini','gpt-4o-mini','gpt-5-mini']).filter(Boolean);
+        let started = false;
+        for(const mdl of models){
+          try{
+            const payload = makePayload(mdl);
+            const reqUp = https.request({
+              hostname: endpoint.hostname,
+              path: endpoint.pathname + endpoint.search,
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }, (resp)=>{
+              if(resp.statusCode && resp.statusCode>=400){
+                try{ sse({ error:'upstream_status_'+resp.statusCode }); }catch(_){ }
+                return;
+              }
+              started = true;
+              resp.setEncoding('utf8');
+              let buffer = '';
+              resp.on('data', (chunk)=>{
+                buffer += chunk;
+                const lines = buffer.split(/\n/);
+                buffer = lines.pop()||'';
+                for(const line of lines){
+                  const trimmed = line.trim();
+                  if(!trimmed) continue;
+                  if(trimmed.startsWith('data:')){
+                    const data = trimmed.slice(5).trim();
+                    if(data === '[DONE]'){ sse({ done:true }); return; }
+                    try{
+                      const json = JSON.parse(data);
+                      const delta = json?.choices?.[0]?.delta?.content || '';
+                      if(delta){ sse({ delta }); }
+                    }catch(_){ /* ignore */ }
+                  }
+                }
+              });
+              resp.on('end', ()=>{ try{ sse({ done:true }); }catch(_){ } });
+            });
+            reqUp.on('error', ()=>{ /* try next */ });
+            reqUp.write(JSON.stringify(payload));
+            reqUp.end();
+            if(started) break;
+          }catch(_){ /* try next */ }
+        }
+        if(!started){ try{ sse({ error:'upstream_error_all' }); }catch(_){ } }
       }catch(_){ try{ sse({ error:'stream_init_failed' }); }catch(_){ } }
 
       return; // keep SSE open
@@ -2355,7 +2409,8 @@ const server = http.createServer(async (req, res) => {
         ok:true,
         env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1' },
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
-        effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() }
+        effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
+        aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: OPENAI_FALLBACK_CHAT, fallbackStruct: OPENAI_FALLBACK_STRUCT }
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));
