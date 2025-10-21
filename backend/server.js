@@ -407,15 +407,16 @@ function getBaseUrl(req){
 
 // 在允許匿名的情況下，確保每位未登入使用者有固定的簽名 uid cookie（持久化到瀏覽器），避免資料混用
 function ensureAnonCookie(req, res){
-  if(REQUIRE_AUTH) return;
+  if(REQUIRE_AUTH) return null;
   try{
     const cookies = parseCookies(req);
     const existing = verifySigned(cookies['uid']||'');
-    if(existing) return; // 已存在有效 uid
+    if(existing) return existing; // 已存在有效 uid，回傳供當次請求使用
     const anonId = 'anon:' + crypto.randomBytes(12).toString('hex');
     const isHttps = /^https:\/\//.test(getBaseUrl(req)||'');
     setCookie(res, 'uid', createSigned(anonId), { maxAge: 60*60*24*365, secure: isHttps });
-  }catch(_){ /* ignore */ }
+    return anonId;
+  }catch(_){ return null; }
 }
 
 function parseBody(req) {
@@ -2209,14 +2210,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && reqPath === '/api/transactions'){
       if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify([])); } }
       const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
+      const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-UID': uid, 'X-User-Mode': isDbEnabled()?'db':'file' };
       if(isDbEnabled()){
-        const rows = await pgdb.getTransactions(user?.id);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        const rows = await pgdb.getTransactions(uid);
+        res.writeHead(200, commonHeaders);
         return res.end(JSON.stringify(rows));
       } else {
-        const uid = user?.id || reqUserId(req);
         const rows = fileStore.getTransactions(uid);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(200, commonHeaders);
         return res.end(JSON.stringify(rows));
       }
     }
@@ -2225,12 +2229,14 @@ const server = http.createServer(async (req, res) => {
       const raw = await parseBody(req);
       const payload = JSON.parse(raw.toString('utf-8') || '{}');
       const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
       if(isDbEnabled()){
-        const rec = await pgdb.addTransaction(user?.id, payload);
+        const rec = await pgdb.addTransaction(uid, payload);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const uid = user?.id || reqUserId(req);
         const rec = fileStore.addTransaction(uid, payload);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
@@ -2240,14 +2246,17 @@ const server = http.createServer(async (req, res) => {
       if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
+      const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-UID': uid, 'X-User-Mode': isDbEnabled()?'db':'file' };
       if(isDbEnabled()){
-        const rec = await pgdb.getTransactionById(user?.id, id);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        const rec = await pgdb.getTransactionById(uid, id);
+        res.writeHead(200, commonHeaders);
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const uid = user?.id || reqUserId(req);
         const rec = fileStore.getTransactionById(uid, id);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(200, commonHeaders);
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       }
     }
@@ -2257,13 +2266,15 @@ const server = http.createServer(async (req, res) => {
       const raw = await parseBody(req);
       const patch = JSON.parse(raw.toString('utf-8') || '{}');
       const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
       if(isDbEnabled()){
-        const rec = await pgdb.updateTransaction(user?.id, id, patch);
+        const rec = await pgdb.updateTransaction(uid, id, patch);
         if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true, transaction: rec }));
       } else {
-        const uid = user?.id || reqUserId(req);
         const rec = fileStore.updateTransaction(uid, id, patch);
         if(!rec){ res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2274,12 +2285,14 @@ const server = http.createServer(async (req, res) => {
       if(REQUIRE_AUTH){ const u = getUserFromRequest(req); if(!u){ res.writeHead(401, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); } }
       const id = decodeURIComponent(reqPath.split('/').pop()||'');
       const user = getUserFromRequest(req);
+      let uid = user?.id || '';
+      if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+      if(!uid) uid = 'anonymous';
       if(isDbEnabled()){
-        await pgdb.deleteTransaction(user?.id, id);
+        await pgdb.deleteTransaction(uid, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok:true }));
       } else {
-        const uid = user?.id || reqUserId(req);
         const ok = fileStore.deleteTransaction(uid, id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok }));
