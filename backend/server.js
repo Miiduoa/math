@@ -605,6 +605,101 @@ function seenAndMarkRecent(userId, payload, ttlMs=120000){
   }catch{ return false; }
 }
 
+// Notes guided flow
+const noteFlow = new Map(); // userId -> { step:'content'|'title'|'tags'|'emoji'|'color'|'confirm', rec }
+
+function buildNoteContentPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '新增記事',
+    subtitle: '步驟 1/5：內容',
+    lines:[ '請輸入記事內容' ],
+    buttons:[ { style:'link', action:{ type:'postback', label:'取消', data:'flow=note&step=cancel' } } ],
+    showHero:false, compact:true
+  });
+}
+
+function buildNoteTitlePrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '記事標題',
+    subtitle: '步驟 2/5：標題（選填）',
+    lines:[ '請輸入記事標題，或按「跳過」直接進入下一步' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'跳過', data:'flow=note&step=title_skip' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=note&step=cancel' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
+function buildNoteTagsPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '記事標籤',
+    subtitle: '步驟 3/5：標籤（選填）',
+    lines:[ '請輸入標籤，以空白分隔，或按「跳過」' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'跳過', data:'flow=note&step=tags_skip' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=note&step=cancel' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
+function buildNoteEmojiPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '記事表情',
+    subtitle: '步驟 4/5：表情符號（選填）',
+    lines:[ '請輸入一個表情符號，或按「跳過」' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'跳過', data:'flow=note&step=emoji_skip' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=note&step=cancel' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
+function buildNoteColorPrompt(base){
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '記事顏色',
+    subtitle: '步驟 5/5：顏色（選填）',
+    lines:[ '選擇記事顏色' ],
+    buttons:[
+      { style:'secondary', color:'#64748b', action:{ type:'postback', label:'跳過', data:'flow=note&step=color_skip' } },
+      { style:'secondary', color:'#ef4444', action:{ type:'postback', label:'紅色', data:'flow=note&step=color&value=red' } },
+      { style:'secondary', color:'#3b82f6', action:{ type:'postback', label:'藍色', data:'flow=note&step=color&value=blue' } },
+      { style:'secondary', color:'#10b981', action:{ type:'postback', label:'綠色', data:'flow=note&step=color&value=green' } },
+      { style:'secondary', color:'#f59e0b', action:{ type:'postback', label:'黃色', data:'flow=note&step=color&value=yellow' } },
+      { style:'secondary', color:'#8b5cf6', action:{ type:'postback', label:'紫色', data:'flow=note&step=color&value=purple' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
+function buildNoteConfirmBubble(base, rec){
+  const lines = [];
+  if(rec.title) lines.push(`標題：${rec.title}`);
+  lines.push(`內容：${rec.content.slice(0,60)}${rec.content.length>60?'...':''}`);
+  if(rec.tags && rec.tags.length) lines.push(`標籤：${rec.tags.join(', ')}`);
+  if(rec.emoji) lines.push(`表情：${rec.emoji}`);
+  if(rec.color) lines.push(`顏色：${rec.color}`);
+  
+  return glassFlexBubble({
+    baseUrl: base,
+    title: '確認新增記事',
+    subtitle: '請確認內容無誤',
+    lines,
+    buttons:[
+      { style:'primary', action:{ type:'postback', label:'確認新增', data:'flow=note&step=confirm&do=1' } },
+      { style:'link', action:{ type:'postback', label:'取消', data:'flow=note&step=cancel' } }
+    ],
+    showHero:false, compact:true
+  });
+}
+
 // Reminders guided flow (file-based)
 const remFlow = new Map(); // userId -> { step:'title'|'due'|'repeat'|'repeat_weekdays'|'monthly_day'|'priority'|'note'|'confirm', rec }
 function buildRemTitlePrompt(base){
@@ -2391,6 +2486,63 @@ const server = http.createServer(async (req, res) => {
             const dataObj = parsePostbackData(ev.postback?.data||'');
             const flow = dataObj.flow;
             const base = getBaseUrl(req)||'';
+            
+            // Notes guided flow (postback)
+            if(flow==='note'){
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              let st = noteFlow.get(uid) || { step:'content', rec:{ title:'', content:'', tags:[], emoji:'', color:'', pinned:false, archived:false } };
+              const step = String(dataObj.step||'');
+              if(step==='cancel'){
+                noteFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已取消', subtitle:'已中止記事流程', lines:[], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已取消', contents:bubble }]);
+                continue;
+              }
+              if(st.step==='content'){
+                // waiting for text, but allow user to restart by pressing menu: show content prompt
+                const bubble = buildNoteContentPrompt(base);
+                await lineReply(replyToken, [{ type:'flex', altText:'新增記事', contents:bubble }]);
+                continue;
+              }
+              if(step==='title_skip'){
+                st.step='tags'; noteFlow.set(uid, st);
+                const bubble = buildNoteTagsPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'記事標籤', contents:bubble }]); continue;
+              }
+              if(step==='tags_skip'){
+                st.step='emoji'; noteFlow.set(uid, st);
+                const bubble = buildNoteEmojiPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'記事表情', contents:bubble }]); continue;
+              }
+              if(step==='emoji_skip'){
+                st.step='color'; noteFlow.set(uid, st);
+                const bubble = buildNoteColorPrompt(base); await lineReply(replyToken, [{ type:'flex', altText:'記事顏色', contents:bubble }]); continue;
+              }
+              if(step==='color_skip' || step==='color'){
+                if(step==='color'){
+                  const value = String(dataObj.value||'');
+                  if(['red','blue','green','yellow','purple'].includes(value)) st.rec.color = value;
+                }
+                st.step='confirm'; noteFlow.set(uid, st);
+                const bubble = buildNoteConfirmBubble(base, st.rec); await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]); continue;
+              }
+              if(step==='confirm' && dataObj.do==='1'){
+                // finalize
+                try{
+                  let rec;
+                  if(isDbEnabled()){
+                    rec = await pgdb.addNote(uid, st.rec);
+                  } else {
+                    const rows = getNotes(uid);
+                    rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...st.rec, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                    rows.unshift(rec); setNotes(uid, rows);
+                  }
+                }catch(_){ }
+                noteFlow.delete(uid);
+                const bubble = glassFlexBubble({ baseUrl:base, title:'已新增記事', subtitle:new Date().toLocaleString('zh-TW'), lines:[ st.rec.content.slice(0,80) ], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'已新增記事', contents:bubble }]);
+                continue;
+              }
+            }
+            
             // Reminders guided flow (postback)
             if(flow==='rem'){
               const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
@@ -2444,11 +2596,14 @@ const server = http.createServer(async (req, res) => {
                 const bubble = buildRemConfirmBubble(base, st.rec); await lineReply(replyToken, [{ type:'flex', altText:'確認新增', contents:bubble }]); continue;
               }
               if(step==='confirm' && dataObj.do==='1'){
-                // finalize (file-based mode only)
+                // finalize
                 try{
-                  if(!isDbEnabled()){
+                  let rec;
+                  if(isDbEnabled()){
+                    rec = await pgdb.addReminder(uid, st.rec);
+                  } else {
                     const rows = getReminders(uid);
-                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...st.rec, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+                    rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...st.rec, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
                     rows.unshift(rec); setReminders(uid, rows);
                   }
                 }catch(_){ }
@@ -2776,6 +2931,44 @@ const server = http.createServer(async (req, res) => {
             }catch(_){ }
             const text = String(ev.message.text||'').trim();
             const normalized = text.replace(/\s+/g,'');
+            
+            // Notes guided flow (message input)
+            {
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              let st = noteFlow.get(uid);
+              if(st){
+                if(st.step==='content'){
+                  st.rec.content = text;
+                  st.step='title'; noteFlow.set(uid, st);
+                  const bubble = buildNoteTitlePrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'記事標題', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='title'){
+                  st.rec.title = text;
+                  st.step='tags'; noteFlow.set(uid, st);
+                  const bubble = buildNoteTagsPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'記事標籤', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='tags'){
+                  const tags = text.split(/\s+/).filter(t=>t.length>0).slice(0,20);
+                  st.rec.tags = tags;
+                  st.step='emoji'; noteFlow.set(uid, st);
+                  const bubble = buildNoteEmojiPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'記事表情', contents:bubble }]);
+                  continue;
+                }
+                if(st.step==='emoji'){
+                  st.rec.emoji = text.slice(0,4);
+                  st.step='color'; noteFlow.set(uid, st);
+                  const bubble = buildNoteColorPrompt(getBaseUrl(req)||'');
+                  await lineReply(replyToken, [{ type:'flex', altText:'記事顏色', contents:bubble }]);
+                  continue;
+                }
+              }
+            }
+            
             // Reminders guided flow (message input)
             {
               const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
@@ -3228,14 +3421,18 @@ const server = http.createServer(async (req, res) => {
               const content = (m && m[1]) ? m[1].trim() : '';
               if(content){
                 try{
-                  if(!isDbEnabled()){
+                  const payload = { title:'', content, tags:[], emoji:'', color:'', pinned:false, archived:false };
+                  let rec;
+                  if(isDbEnabled()){
+                    rec = await pgdb.addNote(uid, payload);
+                  } else {
                     const rows = getNotes(uid);
-                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), title:'', content, tags:[], emoji:'', color:'', pinned:false, archived:false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                    rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...payload, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
                     rows.unshift(rec); setNotes(uid, rows);
-                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增記事', subtitle:new Date().toLocaleString('zh-TW'), lines:[ content.slice(0,80) ], showHero:false, compact:true });
-                    await lineReply(replyToken, [{ type:'flex', altText:'已新增記事', contents:bubble }]);
-                    continue;
                   }
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增記事', subtitle:new Date().toLocaleString('zh-TW'), lines:[ content.slice(0,80) ], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'已新增記事', contents:bubble }]);
+                  continue;
                 }catch(_){ /* ignore */ }
               }
               const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增記事', subtitle:'請以「記事：內容」格式輸入', lines:[], showHero:false, compact:true });
@@ -3243,9 +3440,12 @@ const server = http.createServer(async (req, res) => {
               continue;
             }
 
-            // 新增記事（提示）
+            // 新增記事（引導式流程）
             if(/新增記事/.test(text)){
-              const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增記事', subtitle:'請以「記事：內容」格式輸入', lines:['例如：記事：今天午餐筆記'], showHero:false, compact:true });
+              const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
+              const st = { step:'content', rec:{ title:'', content:'', tags:[], emoji:'', color:'', pinned:false, archived:false } };
+              noteFlow.set(uid, st);
+              const bubble = buildNoteContentPrompt(getBaseUrl(req)||'');
               await lineReply(replyToken, [{ type:'flex', altText:'新增記事', contents:bubble }]);
               continue;
             }
@@ -3254,13 +3454,17 @@ const server = http.createServer(async (req, res) => {
             if(/記事清單/.test(text)){
               try{
                 const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
-                if(!isDbEnabled()){
-                  const rows = getNotes(uid).slice(0,5);
-                  const lines = rows.length? rows.map(n=> `${new Date(n.updatedAt||n.createdAt).toLocaleString()}｜${(n.title||'').slice(0,20)}${n.title?'：':''}${(n.content||'').slice(0,40)}`) : ['目前沒有記事'];
-                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'記事清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=notes' } } ], showHero:false, compact:true });
-                  await lineReply(replyToken, [{ type:'flex', altText:'記事清單', contents:bubble }]);
-                  continue;
+                let rows = [];
+                if(isDbEnabled()){
+                  rows = await pgdb.getNotes(uid);
+                } else {
+                  rows = getNotes(uid);
                 }
+                rows = rows.slice(0,5);
+                const lines = rows.length? rows.map(n=> `${new Date(n.updatedAt||n.createdAt).toLocaleString()}｜${(n.title||'').slice(0,20)}${n.title?'：':''}${(n.content||'').slice(0,40)}`) : ['目前沒有記事'];
+                const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'記事清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=notes' } } ], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'記事清單', contents:bubble }]);
+                continue;
               }catch(_){ /* ignore */ }
             }
 
@@ -3277,15 +3481,19 @@ const server = http.createServer(async (req, res) => {
               }
               if(title){
                 try{
-                  if(!isDbEnabled()){
+                  const payload = { title, note:'', priority:'medium', tags:[], repeat:'none', monthDay:undefined, weekdays:[], done:false, dueAt };
+                  let rec;
+                  if(isDbEnabled()){
+                    rec = await pgdb.addReminder(uid, payload);
+                  } else {
                     const rows = getReminders(uid);
-                    const rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), title, note:'', priority:'medium', tags:[], repeat:'none', monthDay:undefined, weekdays:[], done:false, dueAt, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                    rec = { id: (crypto.randomUUID&&crypto.randomUUID())||String(Date.now()), ...payload, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
                     rows.unshift(rec); setReminders(uid, rows);
-                    const line1 = dueAt ? `${new Date(dueAt).toLocaleString()}｜${title}` : title;
-                    const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增提醒', subtitle:new Date().toLocaleString('zh-TW'), lines:[ line1 ], showHero:false, compact:true });
-                    await lineReply(replyToken, [{ type:'flex', altText:'已新增提醒', contents:bubble }]);
-                    continue;
                   }
+                  const line1 = dueAt ? `${new Date(dueAt).toLocaleString()}｜${title}` : title;
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'已新增提醒', subtitle:new Date().toLocaleString('zh-TW'), lines:[ line1 ], showHero:false, compact:true });
+                  await lineReply(replyToken, [{ type:'flex', altText:'已新增提醒', contents:bubble }]);
+                  continue;
                 }catch(_){ /* ignore */ }
               }
               const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'新增提醒', subtitle:'請以「提醒：內容 YYYY-MM-DD[ HH:MM]」輸入', lines:['日期可省略'], showHero:false, compact:true });
@@ -3297,13 +3505,17 @@ const server = http.createServer(async (req, res) => {
             if(/提醒清單/.test(text)){
               try{
                 const uid = userId || (lineUidRaw ? `line:${lineUidRaw}` : 'anonymous');
-                if(!isDbEnabled()){
-                  const rows = getReminders(uid).slice(0,5);
-                  const lines = rows.length? rows.map(r=> `${r.dueAt?new Date(r.dueAt).toLocaleString():'無期限'}｜${r.title}`) : ['目前沒有提醒'];
-                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'提醒清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=reminders' } } ], showHero:false, compact:true });
-                  await lineReply(replyToken, [{ type:'flex', altText:'提醒清單', contents:bubble }]);
-                  continue;
+                let rows = [];
+                if(isDbEnabled()){
+                  rows = await pgdb.getReminders(uid);
+                } else {
+                  rows = getReminders(uid);
                 }
+                rows = rows.slice(0,5);
+                const lines = rows.length? rows.map(r=> `${r.dueAt?new Date(r.dueAt).toLocaleString():'無期限'}｜${r.title}`) : ['目前沒有提醒'];
+                const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'提醒清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=reminders' } } ], showHero:false, compact:true });
+                await lineReply(replyToken, [{ type:'flex', altText:'提醒清單', contents:bubble }]);
+                continue;
               }catch(_){ /* ignore */ }
             }
             // Multi-line batch add: split by newline/;； then handle each line
@@ -3625,64 +3837,98 @@ const server = http.createServer(async (req, res) => {
   // Notes CRUD
   if(reqPath==='/api/notes' && req.method==='GET'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(getNotes(uid)));
+    if(isDbEnabled()){
+      const rows = await pgdb.getNotes(uid);
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(rows));
+    } else {
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(getNotes(uid)));
+    }
   }
   if(reqPath==='/api/notes' && req.method==='POST'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getNotes(uid);
-    const rec = {
-      id: safeId(),
+    const payload = {
       title: String(body.title||'').slice(0,120),
       content: String(body.content||'').slice(0,4000),
       tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : [],
       pinned: !!body.pinned,
       color: String(body.color||'').slice(0,16), // 'red','blue','green','yellow','purple'...
       emoji: String(body.emoji||'').slice(0,4),
-      archived: !!body.archived,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      archived: !!body.archived
     };
-    rows.unshift(rec); setNotes(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
+    if(isDbEnabled()){
+      const rec = await pgdb.addNote(uid, payload);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
+    } else {
+      const rows = getNotes(uid);
+      const rec = {
+        id: safeId(),
+        ...payload,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      rows.unshift(rec); setNotes(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:rec }));
+    }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='PUT'){
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getNotes(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-    const next = {
-      ...rows[idx],
-      ...body,
-      title: String((body.title??rows[idx].title)||'').slice(0,120),
-      content: String((body.content??rows[idx].content)||'').slice(0,4000),
-      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : (rows[idx].tags||[]),
-      color: String((body.color??rows[idx].color)||'').slice(0,16),
-      emoji: String((body.emoji??rows[idx].emoji)||'').slice(0,4),
-      archived: typeof body.archived==='boolean' ? body.archived : !!rows[idx].archived,
-      updatedAt: new Date().toISOString()
+    const patch = {
+      title: String((body.title||'')||'').slice(0,120),
+      content: String((body.content||'')||'').slice(0,4000),
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : undefined,
+      color: String((body.color||'')||'').slice(0,16),
+      emoji: String((body.emoji||'')||'').slice(0,4),
+      pinned: typeof body.pinned === 'boolean' ? body.pinned : undefined,
+      archived: typeof body.archived === 'boolean' ? body.archived : undefined
     };
-    rows[idx]=next; setNotes(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
+    // Remove undefined values
+    Object.keys(patch).forEach(key => patch[key] === undefined && delete patch[key]);
+    if(isDbEnabled()){
+      const next = await pgdb.updateNote(uid, id, patch);
+      if(!next){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
+    } else {
+      const rows = getNotes(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      const next = {
+        ...rows[idx],
+        ...patch,
+        updatedAt: new Date().toISOString()
+      };
+      rows[idx]=next; setNotes(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, note:next }));
+    }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='DELETE'){
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
-    const rows = getNotes(uid).filter(n=>n.id!==id); setNotes(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    if(isDbEnabled()){
+      await pgdb.deleteNote(uid, id);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    } else {
+      const rows = getNotes(uid).filter(n=>n.id!==id); setNotes(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    }
   }
 
   // Reminders CRUD
   if(reqPath==='/api/reminders' && req.method==='GET'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
-    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(getReminders(uid)));
+    if(isDbEnabled()){
+      const rows = await pgdb.getReminders(uid);
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(rows));
+    } else {
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(getReminders(uid)));
+    }
   }
   if(reqPath==='/api/reminders' && req.method==='POST'){
     const user = isRequireAuth()? getUserFromRequest(req) : null; const uid = user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getReminders(uid);
-    const rec = {
-      id: safeId(),
+    const payload = {
       title: String(body.title||'').slice(0,160),
       dueAt: String(body.dueAt||''),
       repeat: String(body.repeat||'none'), // none|daily|weekly|monthly
@@ -3691,36 +3937,63 @@ const server = http.createServer(async (req, res) => {
       priority: ['low','medium','high'].includes(String(body.priority)) ? String(body.priority) : 'medium',
       tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : [],
       note: String(body.note||'').slice(0,1000),
-      done: !!body.done,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      done: !!body.done
     };
-    rows.unshift(rec); setReminders(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:rec }));
+    if(isDbEnabled()){
+      const rec = await pgdb.addReminder(uid, payload);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:rec }));
+    } else {
+      const rows = getReminders(uid);
+      const rec = {
+        id: safeId(),
+        ...payload,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      rows.unshift(rec); setReminders(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:rec }));
+    }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='PUT'){
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
-    const rows = getReminders(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
-    const next = {
-      ...rows[idx],
-      ...body,
-      title: String((body.title??rows[idx].title)||'').slice(0,160),
-      repeat: String((body.repeat??rows[idx].repeat)||'none'),
-      weekdays: Array.isArray(body.weekdays) ? body.weekdays.map(n=> Number(n)|0).filter(n=> n>=0 && n<=6).slice(0,7) : (rows[idx].weekdays||[]),
-      monthDay: Number.isFinite(Number(body.monthDay)) ? Math.max(1, Math.min(31, Number(body.monthDay))) : (rows[idx].monthDay),
-      priority: ['low','medium','high'].includes(String(body.priority)) ? String(body.priority) : (rows[idx].priority||'medium'),
-      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : (rows[idx].tags||[]),
-      note: String((body.note??rows[idx].note)||'').slice(0,1000),
-      updatedAt: new Date().toISOString()
+    const patch = {
+      title: String((body.title||'')||'').slice(0,160),
+      dueAt: String(body.dueAt||''),
+      repeat: String((body.repeat||'')||'none'),
+      weekdays: Array.isArray(body.weekdays) ? body.weekdays.map(n=> Number(n)|0).filter(n=> n>=0 && n<=6).slice(0,7) : undefined,
+      monthDay: Number.isFinite(Number(body.monthDay)) ? Math.max(1, Math.min(31, Number(body.monthDay))) : undefined,
+      priority: ['low','medium','high'].includes(String(body.priority)) ? String(body.priority) : undefined,
+      tags: Array.isArray(body.tags) ? body.tags.slice(0,20).map(x=>String(x).slice(0,24)) : undefined,
+      note: String((body.note||'')||'').slice(0,1000),
+      done: typeof body.done === 'boolean' ? body.done : undefined
     };
-    rows[idx]=next; setReminders(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:next }));
+    // Remove undefined values
+    Object.keys(patch).forEach(key => patch[key] === undefined && delete patch[key]);
+    if(isDbEnabled()){
+      const next = await pgdb.updateReminder(uid, id, patch);
+      if(!next){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:next }));
+    } else {
+      const rows = getReminders(uid); const idx = rows.findIndex(n=>n.id===id); if(idx<0){ res.writeHead(404,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false })); }
+      const next = {
+        ...rows[idx],
+        ...patch,
+        updatedAt: new Date().toISOString()
+      };
+      rows[idx]=next; setReminders(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true, reminder:next }));
+    }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='DELETE'){
     const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = isRequireAuth()? getUserFromRequest(req) : null; const uid=user?.id||user?.userId||'anonymous';
-    const rows = getReminders(uid).filter(n=>n.id!==id); setReminders(uid, rows);
-    res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    if(isDbEnabled()){
+      await pgdb.deleteReminder(uid, id);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    } else {
+      const rows = getReminders(uid).filter(n=>n.id!==id); setReminders(uid, rows);
+      res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
+    }
   }
 
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });

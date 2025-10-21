@@ -79,6 +79,38 @@ async function initSchema(pool){
     line_user_id text not null,
     expires_at timestamptz not null
   );
+  -- notes table
+  create table if not exists notes (
+    id text primary key,
+    user_id text,
+    title text default '',
+    content text not null,
+    tags text[] default '{}',
+    emoji text default '',
+    color text default '',
+    pinned boolean default false,
+    archived boolean default false,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists idx_notes_user on notes(user_id);
+  -- reminders table
+  create table if not exists reminders (
+    id text primary key,
+    user_id text,
+    title text not null,
+    due_at timestamptz,
+    repeat text not null default 'none',
+    weekdays integer[] default '{}',
+    month_day integer,
+    priority text not null default 'medium',
+    tags text[] default '{}',
+    note text default '',
+    done boolean default false,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists idx_reminders_user on reminders(user_id);
   `);
   // seed settings and default categories
   const res = await pool.query('select count(*)::int as c from categories');
@@ -303,6 +335,144 @@ export const db = {
     const p = await getPool();
     const r = await p.query('select word, counts from user_model_words where user_id=$1', [userId||null]);
     return r.rows.map(x=> ({ word:x.word, counts:x.counts||{} }));
+  },
+  // Reminders CRUD
+  async getReminders(userId){
+    const p = await getPool();
+    const r = await p.query('select * from reminders where user_id=$1 order by created_at desc', [userId||null]);
+    return r.rows.map(row=>({
+      id: row.id,
+      title: row.title,
+      dueAt: row.due_at ? row.due_at.toISOString() : null,
+      repeat: row.repeat,
+      weekdays: row.weekdays || [],
+      monthDay: row.month_day,
+      priority: row.priority,
+      tags: row.tags || [],
+      note: row.note || '',
+      done: row.done === true,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString()
+    }));
+  },
+  async addReminder(userId, payload){
+    const p = await getPool();
+    const id = (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
+    const now = new Date().toISOString();
+    await p.query(`insert into reminders(
+      id, user_id, title, due_at, repeat, weekdays, month_day, priority, tags, note, done, created_at, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [
+      id, userId||null, payload.title, payload.dueAt || null, payload.repeat || 'none',
+      payload.weekdays || [], payload.monthDay || null, payload.priority || 'medium',
+      payload.tags || [], payload.note || '', payload.done === true, now, now
+    ]);
+    return { id, ...payload, createdAt: now, updatedAt: now };
+  },
+  async updateReminder(userId, id, patch){
+    const p = await getPool();
+    // fetch current
+    const cur = await this.getReminderById(userId, id);
+    if(!cur) return null;
+    const next = { ...cur, ...patch, updatedAt: new Date().toISOString() };
+    await p.query(`update reminders set 
+      title=$3, due_at=$4, repeat=$5, weekdays=$6, month_day=$7, priority=$8, tags=$9, note=$10, done=$11, updated_at=$12
+      where id=$1 and user_id=$2`, [
+      id, userId||null, next.title, next.dueAt || null, next.repeat || 'none',
+      next.weekdays || [], next.monthDay || null, next.priority || 'medium',
+      next.tags || [], next.note || '', next.done === true, next.updatedAt
+    ]);
+    return next;
+  },
+  async getReminderById(userId, id){
+    const p = await getPool();
+    const r = await p.query('select * from reminders where id=$1 and user_id=$2', [id, userId||null]);
+    const row = r.rows[0];
+    if(!row) return null;
+    return {
+      id: row.id,
+      title: row.title,
+      dueAt: row.due_at ? row.due_at.toISOString() : null,
+      repeat: row.repeat,
+      weekdays: row.weekdays || [],
+      monthDay: row.month_day,
+      priority: row.priority,
+      tags: row.tags || [],
+      note: row.note || '',
+      done: row.done === true,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString()
+    };
+  },
+  async deleteReminder(userId, id){
+    const p = await getPool();
+    await p.query('delete from reminders where id=$1 and user_id=$2', [id, userId||null]);
+    return true;
+  },
+  // Notes CRUD
+  async getNotes(userId){
+    const p = await getPool();
+    const r = await p.query('select * from notes where user_id=$1 order by updated_at desc', [userId||null]);
+    return r.rows.map(row=>({
+      id: row.id,
+      title: row.title || '',
+      content: row.content,
+      tags: row.tags || [],
+      emoji: row.emoji || '',
+      color: row.color || '',
+      pinned: row.pinned === true,
+      archived: row.archived === true,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString()
+    }));
+  },
+  async addNote(userId, payload){
+    const p = await getPool();
+    const id = (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || String(Date.now())+Math.random().toString(16).slice(2);
+    const now = new Date().toISOString();
+    await p.query(`insert into notes(
+      id, user_id, title, content, tags, emoji, color, pinned, archived, created_at, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [
+      id, userId||null, payload.title || '', payload.content, payload.tags || [],
+      payload.emoji || '', payload.color || '', payload.pinned === true, payload.archived === true, now, now
+    ]);
+    return { id, ...payload, createdAt: now, updatedAt: now };
+  },
+  async updateNote(userId, id, patch){
+    const p = await getPool();
+    // fetch current
+    const cur = await this.getNoteById(userId, id);
+    if(!cur) return null;
+    const next = { ...cur, ...patch, updatedAt: new Date().toISOString() };
+    await p.query(`update notes set 
+      title=$3, content=$4, tags=$5, emoji=$6, color=$7, pinned=$8, archived=$9, updated_at=$10
+      where id=$1 and user_id=$2`, [
+      id, userId||null, next.title || '', next.content, next.tags || [],
+      next.emoji || '', next.color || '', next.pinned === true, next.archived === true, next.updatedAt
+    ]);
+    return next;
+  },
+  async getNoteById(userId, id){
+    const p = await getPool();
+    const r = await p.query('select * from notes where id=$1 and user_id=$2', [id, userId||null]);
+    const row = r.rows[0];
+    if(!row) return null;
+    return {
+      id: row.id,
+      title: row.title || '',
+      content: row.content,
+      tags: row.tags || [],
+      emoji: row.emoji || '',
+      color: row.color || '',
+      pinned: row.pinned === true,
+      archived: row.archived === true,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString()
+    };
+  },
+  async deleteNote(userId, id){
+    const p = await getPool();
+    await p.query('delete from notes where id=$1 and user_id=$2', [id, userId||null]);
+    return true;
   }
 };
 
