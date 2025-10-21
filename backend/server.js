@@ -3843,8 +3843,10 @@ const server = http.createServer(async (req, res) => {
   // Notes CRUD
   if(reqPath==='/api/notes' && req.method==='GET'){
     const user = getUserFromRequest(req);
-    const uid = user?.id || 'anonymous';
-    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' };
+    let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
+    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-UID': uid, 'X-User-Mode': isDbEnabled()?'db':'file' };
     if(isDbEnabled()){
       const rows = await pgdb.getNotes(uid);
       res.writeHead(200, commonHeaders);
@@ -3856,7 +3858,9 @@ const server = http.createServer(async (req, res) => {
   }
   if(reqPath==='/api/notes' && req.method==='POST'){
     const user = getUserFromRequest(req);
-    const uid = user?.id || 'anonymous';
+    let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const payload = {
       title: String(body.title||'').slice(0,120),
@@ -3883,7 +3887,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='PUT'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const patch = {
       title: String((body.title||'')||'').slice(0,120),
@@ -3912,7 +3918,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/notes\//.test(reqPath) && req.method==='DELETE'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     if(isDbEnabled()){
       await pgdb.deleteNote(uid, id);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
@@ -3925,8 +3933,10 @@ const server = http.createServer(async (req, res) => {
   // Reminders CRUD
   if(reqPath==='/api/reminders' && req.method==='GET'){
     const user = getUserFromRequest(req);
-    const uid = user?.id || 'anonymous';
-    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' };
+    let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
+    const commonHeaders = { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-UID': uid, 'X-User-Mode': isDbEnabled()?'db':'file' };
     if(isDbEnabled()){
       const rows = await pgdb.getReminders(uid);
       res.writeHead(200, commonHeaders);
@@ -3938,7 +3948,9 @@ const server = http.createServer(async (req, res) => {
   }
   if(reqPath==='/api/reminders' && req.method==='POST'){
     const user = getUserFromRequest(req);
-    const uid = user?.id || 'anonymous';
+    let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const payload = {
       title: String(body.title||'').slice(0,160),
@@ -3967,7 +3979,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='PUT'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     const raw = await parseBody(req); const body = JSON.parse(raw.toString('utf-8')||'{}');
     const patch = {
       title: String((body.title||'')||'').slice(0,160),
@@ -3998,7 +4012,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if(/^\/api\/reminders\//.test(reqPath) && req.method==='DELETE'){
-    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); const uid = user?.id || 'anonymous';
+    const id = decodeURIComponent(reqPath.split('/').pop()||''); const user = getUserFromRequest(req); let uid = user?.id || '';
+    if(!uid && !REQUIRE_AUTH){ uid = ensureAnonCookie(req, res) || 'anonymous'; }
+    if(!uid) uid = 'anonymous';
     if(isDbEnabled()){
       await pgdb.deleteReminder(uid, id);
       res.writeHead(200,{ 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:true }));
