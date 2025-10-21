@@ -201,77 +201,131 @@
     });
   }
 
-  function bindEvents(){
-    // Notes UI - 完全重寫
-    let notesData = [];
-    
-    async function loadNotes() {
-      try {
-        console.log('Loading notes...');
-        const response = await fetch('/api/notes');
-        if (!response.ok) {
-          console.error('Failed to load notes:', response.status, response.statusText);
-          return [];
-        }
-        const data = await response.json();
-        console.log('Notes loaded:', data.length, 'items');
-        return data;
-      } catch (error) {
-        console.error('Error loading notes:', error);
+  // Notes/Reminders helpers hoisted for tab switching and initial load
+  // Notes
+  let notesData = [];
+  async function loadNotes() {
+    try {
+      console.log('Loading notes...');
+      const response = await fetch('/api/notes');
+      if (!response.ok) {
+        console.error('Failed to load notes:', response.status, response.statusText);
         return [];
       }
+      const data = await response.json();
+      console.log('Notes loaded:', data.length, 'items');
+      return data;
+    } catch (error) {
+      console.error('Error loading notes:', error);
+      return [];
     }
-    
-    function renderNotes() {
-      const list = document.getElementById('notesList');
-      if (!list) {
-        console.error('Notes list element not found');
-        return;
-      }
-      
-      const searchQuery = (document.getElementById('noteSearchInput')?.value || '').trim().toLowerCase();
-      const filteredNotes = searchQuery 
-        ? notesData.filter(note => 
-            (note.title || '').toLowerCase().includes(searchQuery) || 
-            (note.content || '').toLowerCase().includes(searchQuery)
-          )
-        : notesData;
-      
-      if (filteredNotes.length === 0) {
-        list.innerHTML = '<li class="tx-item"><span>目前沒有記事</span></li>';
-        return;
-      }
-      
-      list.innerHTML = filteredNotes.map(note => `
-        <li class="tx-item" data-id="${note.id}">
+  }
+  function renderNotes() {
+    const list = document.getElementById('notesList');
+    if (!list) {
+      console.error('Notes list element not found');
+      return;
+    }
+    const searchQuery = (document.getElementById('noteSearchInput')?.value || '').trim().toLowerCase();
+    const filteredNotes = searchQuery
+      ? notesData.filter(note =>
+          (note.title || '').toLowerCase().includes(searchQuery) ||
+          (note.content || '').toLowerCase().includes(searchQuery)
+        )
+      : notesData;
+    if (filteredNotes.length === 0) {
+      list.innerHTML = '<li class="tx-item"><span>目前沒有記事</span></li>';
+      return;
+    }
+    list.innerHTML = filteredNotes.map(note => `
+      <li class="tx-item" data-id="${note.id}">
+        <div>
           <div>
-            <div>
-              <strong>${note.emoji ? note.emoji + ' ' : ''}${(note.title || '(無標題)').replace(/[<>&]/g, '')}</strong>
-              ${note.pinned ? ' <span class="badge">釘選</span>' : ''}
-              ${note.archived ? ' <span class="badge">封存</span>' : ''}
-            </div>
-            <small>
-              ${new Date(note.updatedAt || note.createdAt).toLocaleString()}
-              ${note.tags && note.tags.length ? ' ｜ ' + note.tags.map(tag => `#${tag}`).join(' ') : ''}
-            </small>
-            <div>${(note.content || '').replace(/[<>&]/g, '')}</div>
+            <strong>${note.emoji ? note.emoji + ' ' : ''}${(note.title || '(無標題)').replace(/[<>&]/g, '')}</strong>
+            ${note.pinned ? ' <span class="badge">釘選</span>' : ''}
+            ${note.archived ? ' <span class="badge">封存</span>' : ''}
           </div>
-          <div class="tx-actions">
-            <button class="ghost" data-action="pin">${note.pinned ? '取消釘選' : '釘選'}</button>
-            <button class="ghost" data-action="archive">${note.archived ? '取消封存' : '封存'}</button>
-            <button class="ghost" data-action="edit">編輯</button>
-            <button class="ghost danger" data-action="delete">刪除</button>
+          <small>
+            ${new Date(note.updatedAt || note.createdAt).toLocaleString()}
+            ${note.tags && note.tags.length ? ' ｜ ' + note.tags.map(tag => `#${tag}`).join(' ') : ''}
+          </small>
+          <div>${(note.content || '').replace(/[<>&]/g, '')}</div>
+        </div>
+        <div class="tx-actions">
+          <button class="ghost" data-action="pin">${note.pinned ? '取消釘選' : '釘選'}</button>
+          <button class="ghost" data-action="archive">${note.archived ? '取消封存' : '封存'}</button>
+          <button class="ghost" data-action="edit">編輯</button>
+          <button class="ghost danger" data-action="delete">刪除</button>
+        </div>
+      </li>
+    `).join('');
+    console.log('Notes rendered:', filteredNotes.length, 'items');
+  }
+  async function refreshNotes() {
+    notesData = await loadNotes();
+    renderNotes();
+  }
+  try{ window._notes = { loadNotes, renderNotes, refreshNotes }; }catch(_){ }
+
+  // Reminders
+  let remindersData = [];
+  async function loadReminders() {
+    try {
+      console.log('Loading reminders...');
+      const response = await fetch('/api/reminders');
+      if (!response.ok) {
+        console.error('Failed to load reminders:', response.status, response.statusText);
+        return [];
+      }
+      const data = await response.json();
+      console.log('Reminders loaded:', data.length, 'items');
+      return data;
+    } catch (error) {
+      console.error('Error loading reminders:', error);
+      return [];
+    }
+  }
+  function renderReminders() {
+    const list = document.getElementById('remindersList');
+    if (!list) {
+      console.error('Reminders list element not found');
+      return;
+    }
+    if (remindersData.length === 0) {
+      list.innerHTML = '<li class="tx-item"><span>目前沒有提醒事項</span></li>';
+      return;
+    }
+    list.innerHTML = remindersData.map(reminder => `
+      <li class="tx-item" data-id="${reminder.id}">
+        <div>
+          <div>
+            <strong>${(reminder.title || '').replace(/[<>&]/g, '')}</strong>
+            ${reminder.priority ? `<span class="badge">${reminder.priority}</span>` : ''}
           </div>
-        </li>
-      `).join('');
-      
-      console.log('Notes rendered:', filteredNotes.length, 'items');
-    }
-    
-    async function refreshNotes() {
-      notesData = await loadNotes();
-      renderNotes();
-    }
+          <small>
+            ${reminder.dueAt ? new Date(reminder.dueAt).toLocaleString() : '無期限'}
+            ${reminder.tags && reminder.tags.length ? ' ｜ ' + reminder.tags.map(tag => `#${tag}`).join(' ') : ''}
+          </small>
+          ${reminder.note ? `<div>${reminder.note.replace(/[<>&]/g, '')}</div>` : ''}
+        </div>
+        <div class="tx-actions">
+          <button class="ghost" data-action="done">${reminder.done ? '標記未完成' : '標記完成'}</button>
+          <button class="ghost" data-action="edit">編輯</button>
+          <button class="ghost" data-action="snooze">延後 1 小時</button>
+          <button class="ghost danger" data-action="delete">刪除</button>
+        </div>
+      </li>
+    `).join('');
+    console.log('Reminders rendered:', remindersData.length, 'items');
+  }
+  async function refreshReminders() {
+    remindersData = await loadReminders();
+    renderReminders();
+  }
+  try{ window._reminders = { loadReminders, renderReminders, refreshReminders }; }catch(_){ }
+
+  function bindEvents(){
+    // Notes UI - 使用頂層 helpers（已提升作用域）
     // 記事事件處理
     document.getElementById('addNoteBtn')?.addEventListener('click', async () => {
       const title = document.getElementById('noteTitleInput')?.value || '';
@@ -306,7 +360,7 @@
         document.getElementById('notePinToggle').checked = false;
         
         // 重新載入記事
-        await refreshNotes();
+        await (window._notes?.refreshNotes?.() || Promise.resolve());
         console.log('Note created successfully');
       } catch (error) {
         console.error('Error creating note:', error);
@@ -315,7 +369,7 @@
     });
     
     // 搜尋功能
-    document.getElementById('noteSearchInput')?.addEventListener('input', renderNotes);
+    document.getElementById('noteSearchInput')?.addEventListener('input', window._notes?.renderNotes || (()=>{}));
     
     // 記事列表事件處理
     document.getElementById('notesList')?.addEventListener('click', async (e) => {
@@ -335,7 +389,7 @@
           const response = await fetch(`/api/notes/${encodeURIComponent(id)}`, { method: 'DELETE' });
           if (!response.ok) throw new Error('Failed to delete note');
           
-          await refreshNotes();
+          await (window._notes?.refreshNotes?.() || Promise.resolve());
           console.log('Note deleted successfully');
         }
         
@@ -350,7 +404,7 @@
           });
           if (!response.ok) throw new Error('Failed to update note');
           
-          await refreshNotes();
+          await (window._notes?.refreshNotes?.() || Promise.resolve());
           console.log('Note pin status updated');
         }
         
@@ -365,7 +419,7 @@
           });
           if (!response.ok) throw new Error('Failed to update note');
           
-          await refreshNotes();
+          await (window._notes?.refreshNotes?.() || Promise.resolve());
           console.log('Note archive status updated');
         }
         
@@ -397,67 +451,7 @@
       }
     });
 
-    // Reminders UI - 完全重寫
-    let remindersData = [];
-    
-    async function loadReminders() {
-      try {
-        console.log('Loading reminders...');
-        const response = await fetch('/api/reminders');
-        if (!response.ok) {
-          console.error('Failed to load reminders:', response.status, response.statusText);
-          return [];
-        }
-        const data = await response.json();
-        console.log('Reminders loaded:', data.length, 'items');
-        return data;
-      } catch (error) {
-        console.error('Error loading reminders:', error);
-        return [];
-      }
-    }
-    
-    function renderReminders() {
-      const list = document.getElementById('remindersList');
-      if (!list) {
-        console.error('Reminders list element not found');
-        return;
-      }
-      
-      if (remindersData.length === 0) {
-        list.innerHTML = '<li class="tx-item"><span>目前沒有提醒事項</span></li>';
-        return;
-      }
-      
-      list.innerHTML = remindersData.map(reminder => `
-        <li class="tx-item" data-id="${reminder.id}">
-          <div>
-            <div>
-              <strong>${(reminder.title || '').replace(/[<>&]/g, '')}</strong>
-              ${reminder.priority ? `<span class="badge">${reminder.priority}</span>` : ''}
-            </div>
-            <small>
-              ${reminder.dueAt ? new Date(reminder.dueAt).toLocaleString() : '無期限'}
-              ${reminder.tags && reminder.tags.length ? ' ｜ ' + reminder.tags.map(tag => `#${tag}`).join(' ') : ''}
-            </small>
-            ${reminder.note ? `<div>${reminder.note.replace(/[<>&]/g, '')}</div>` : ''}
-          </div>
-          <div class="tx-actions">
-            <button class="ghost" data-action="done">${reminder.done ? '標記未完成' : '標記完成'}</button>
-            <button class="ghost" data-action="edit">編輯</button>
-            <button class="ghost" data-action="snooze">延後 1 小時</button>
-            <button class="ghost danger" data-action="delete">刪除</button>
-          </div>
-        </li>
-      `).join('');
-      
-      console.log('Reminders rendered:', remindersData.length, 'items');
-    }
-    
-    async function refreshReminders() {
-      remindersData = await loadReminders();
-      renderReminders();
-    }
+    // Reminders UI - 使用頂層 helpers（已提升作用域）
     // 提醒事項事件處理
     document.getElementById('addReminderBtn')?.addEventListener('click', async () => {
       const title = document.getElementById('reminderTitleInput')?.value || '';
@@ -496,7 +490,7 @@
         document.querySelectorAll('.reminderWeek').forEach(cb => cb.checked = false);
         
         // 重新載入提醒事項
-        await refreshReminders();
+        await (window._reminders?.refreshReminders?.() || Promise.resolve());
         console.log('Reminder created successfully');
       } catch (error) {
         console.error('Error creating reminder:', error);
@@ -522,7 +516,7 @@
           const response = await fetch(`/api/reminders/${encodeURIComponent(id)}`, { method: 'DELETE' });
           if (!response.ok) throw new Error('Failed to delete reminder');
           
-          await refreshReminders();
+          await (window._reminders?.refreshReminders?.() || Promise.resolve());
           console.log('Reminder deleted successfully');
         }
         
@@ -537,7 +531,7 @@
           });
           if (!response.ok) throw new Error('Failed to update reminder');
           
-          await refreshReminders();
+          await (window._reminders?.refreshReminders?.() || Promise.resolve());
           console.log('Reminder done status updated');
         }
         
@@ -555,7 +549,7 @@
           });
           if (!response.ok) throw new Error('Failed to snooze reminder');
           
-          await refreshReminders();
+          await (window._reminders?.refreshReminders?.() || Promise.resolve());
           console.log('Reminder snoozed for 1 hour');
         }
         
@@ -574,7 +568,7 @@
           });
           if (!response.ok) throw new Error('Failed to update reminder');
           
-          await refreshReminders();
+          await (window._reminders?.refreshReminders?.() || Promise.resolve());
           console.log('Reminder updated successfully');
         }
       } catch (error) {
