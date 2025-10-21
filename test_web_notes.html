@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>記事功能測試</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .note-item { margin: 10px 0; padding: 10px; background: #f5f5f5; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>記事功能測試</h1>
+    
+    <div class="test-section">
+        <h2>1. 測試 API 連線</h2>
+        <button onclick="testAPI()">測試 API</button>
+        <div id="apiResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>2. 新增記事</h2>
+        <input type="text" id="noteTitle" placeholder="標題" style="width: 200px; margin: 5px;">
+        <br>
+        <textarea id="noteContent" placeholder="內容" style="width: 300px; height: 60px; margin: 5px;"></textarea>
+        <br>
+        <input type="text" id="noteTags" placeholder="標籤（空白分隔）" style="width: 200px; margin: 5px;">
+        <br>
+        <button onclick="addNote()">新增記事</button>
+        <div id="addResult"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>3. 記事清單</h2>
+        <button onclick="loadNotes()">載入記事</button>
+        <div id="notesList"></div>
+    </div>
+
+    <script>
+        async function testAPI() {
+            const resultDiv = document.getElementById('apiResult');
+            try {
+                const response = await fetch('/api/notes');
+                const data = await response.json();
+                resultDiv.innerHTML = `<span class="success">✅ API 連線成功，取得 ${data.length} 筆記事</span>`;
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ API 連線失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function addNote() {
+            const resultDiv = document.getElementById('addResult');
+            const title = document.getElementById('noteTitle').value;
+            const content = document.getElementById('noteContent').value;
+            const tags = document.getElementById('noteTags').value.split(/\s+/).filter(Boolean);
+            
+            if (!content.trim()) {
+                resultDiv.innerHTML = '<span class="error">❌ 請輸入內容</span>';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/notes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content, tags, emoji: '📝', color: 'blue' })
+                });
+                
+                const data = await response.json();
+                if (data.ok) {
+                    resultDiv.innerHTML = `<span class="success">✅ 新增成功: ${data.note.id}</span>`;
+                    document.getElementById('noteTitle').value = '';
+                    document.getElementById('noteContent').value = '';
+                    document.getElementById('noteTags').value = '';
+                } else {
+                    resultDiv.innerHTML = '<span class="error">❌ 新增失敗</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ 新增失敗: ${error.message}</span>`;
+            }
+        }
+
+        async function loadNotes() {
+            const notesDiv = document.getElementById('notesList');
+            try {
+                const response = await fetch('/api/notes');
+                const notes = await response.json();
+                
+                if (notes.length === 0) {
+                    notesDiv.innerHTML = '<p>沒有記事</p>';
+                    return;
+                }
+
+                notesDiv.innerHTML = notes.map(note => `
+                    <div class="note-item">
+                        <strong>${note.emoji || ''} ${note.title || '(無標題)'}</strong>
+                        <br>
+                        <small>${new Date(note.updatedAt || note.createdAt).toLocaleString()}</small>
+                        <br>
+                        <div>${note.content}</div>
+                        ${note.tags && note.tags.length ? `<div>標籤: ${note.tags.map(t => `#${t}`).join(' ')}</div>` : ''}
+                    </div>
+                `).join('');
+            } catch (error) {
+                notesDiv.innerHTML = `<span class="error">❌ 載入失敗: ${error.message}</span>`;
+            }
+        }
+
+        // 頁面載入時自動測試
+        window.onload = function() {
+            testAPI();
+            loadNotes();
+        };
+    </script>
+</body>
+</html>

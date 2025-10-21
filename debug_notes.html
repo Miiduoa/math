@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>記事功能除錯</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .debug-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .info { color: blue; }
+    </style>
+</head>
+<body>
+    <h1>記事功能除錯</h1>
+    
+    <div class="debug-section">
+        <h2>1. 檢查 API 連線</h2>
+        <button onclick="checkAPI()">檢查 API</button>
+        <div id="apiStatus"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h2>2. 檢查記事清單</h2>
+        <button onclick="checkNotes()">檢查記事</button>
+        <div id="notesStatus"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h2>3. 新增測試記事</h2>
+        <button onclick="addTestNote()">新增測試記事</button>
+        <div id="addStatus"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h2>4. 檢查網頁端記事功能</h2>
+        <button onclick="checkWebNotes()">檢查網頁端</button>
+        <div id="webStatus"></div>
+    </div>
+
+    <script>
+        async function checkAPI() {
+            const statusDiv = document.getElementById('apiStatus');
+            try {
+                const response = await fetch('/api/notes');
+                const data = await response.json();
+                statusDiv.innerHTML = `<span class="success">✅ API 連線成功，取得 ${data.length} 筆記事</span>`;
+                console.log('API 回應:', data);
+            } catch (error) {
+                statusDiv.innerHTML = `<span class="error">❌ API 連線失敗: ${error.message}</span>`;
+                console.error('API 錯誤:', error);
+            }
+        }
+
+        async function checkNotes() {
+            const statusDiv = document.getElementById('notesStatus');
+            try {
+                const response = await fetch('/api/notes');
+                const notes = await response.json();
+                
+                if (notes.length === 0) {
+                    statusDiv.innerHTML = '<span class="info">ℹ️ 目前沒有記事</span>';
+                    return;
+                }
+
+                statusDiv.innerHTML = `<span class="success">✅ 找到 ${notes.length} 筆記事</span><br>`;
+                notes.forEach((note, index) => {
+                    statusDiv.innerHTML += `<div style="margin: 5px 0; padding: 5px; background: #f5f5f5;">
+                        <strong>${index + 1}. ${note.title || '(無標題)'}</strong><br>
+                        <small>ID: ${note.id}</small><br>
+                        <small>內容: ${note.content.slice(0, 50)}...</small><br>
+                        <small>時間: ${new Date(note.updatedAt || note.createdAt).toLocaleString()}</small>
+                    </div>`;
+                });
+            } catch (error) {
+                statusDiv.innerHTML = `<span class="error">❌ 檢查失敗: ${error.message}</span>`;
+                console.error('檢查錯誤:', error);
+            }
+        }
+
+        async function addTestNote() {
+            const statusDiv = document.getElementById('addStatus');
+            try {
+                const response = await fetch('/api/notes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: '除錯測試記事',
+                        content: '這是一個用來測試記事功能的記事',
+                        tags: ['除錯', '測試'],
+                        emoji: '🔍',
+                        color: 'red'
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.ok) {
+                    statusDiv.innerHTML = `<span class="success">✅ 新增成功: ${data.note.id}</span>`;
+                } else {
+                    statusDiv.innerHTML = '<span class="error">❌ 新增失敗</span>';
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<span class="error">❌ 新增失敗: ${error.message}</span>`;
+                console.error('新增錯誤:', error);
+            }
+        }
+
+        async function checkWebNotes() {
+            const statusDiv = document.getElementById('webStatus');
+            try {
+                // 檢查網頁端是否能正常載入
+                const response = await fetch('/');
+                const html = await response.text();
+                
+                if (html.includes('notesList')) {
+                    statusDiv.innerHTML = '<span class="success">✅ 網頁端包含記事清單元素</span><br>';
+                } else {
+                    statusDiv.innerHTML = '<span class="error">❌ 網頁端缺少記事清單元素</span><br>';
+                }
+                
+                if (html.includes('renderNotes')) {
+                    statusDiv.innerHTML += '<span class="success">✅ 網頁端包含記事渲染函數</span><br>';
+                } else {
+                    statusDiv.innerHTML += '<span class="error">❌ 網頁端缺少記事渲染函數</span><br>';
+                }
+                
+                if (html.includes('fetchNotes')) {
+                    statusDiv.innerHTML += '<span class="success">✅ 網頁端包含記事取得函數</span><br>';
+                } else {
+                    statusDiv.innerHTML += '<span class="error">❌ 網頁端缺少記事取得函數</span><br>';
+                }
+                
+                // 檢查 JavaScript 檔案
+                const jsResponse = await fetch('/app.js');
+                const jsContent = await jsResponse.text();
+                
+                if (jsContent.includes('renderNotes')) {
+                    statusDiv.innerHTML += '<span class="success">✅ JavaScript 檔案包含記事渲染函數</span><br>';
+                } else {
+                    statusDiv.innerHTML += '<span class="error">❌ JavaScript 檔案缺少記事渲染函數</span><br>';
+                }
+                
+            } catch (error) {
+                statusDiv.innerHTML = `<span class="error">❌ 檢查失敗: ${error.message}</span>`;
+                console.error('檢查錯誤:', error);
+            }
+        }
+
+        // 頁面載入時自動檢查
+        window.onload = function() {
+            checkAPI();
+            checkNotes();
+            checkWebNotes();
+        };
+    </script>
+</body>
+</html>

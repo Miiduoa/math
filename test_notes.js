@@ -2,7 +2,7 @@
 // 測試記事功能
 const http = require('http');
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8787';
 const TEST_USER = 'test-user-notes';
 
 async function testNotesAPI() {
