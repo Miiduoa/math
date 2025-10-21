@@ -225,9 +225,6 @@
       const q = ($('#noteSearchInput')?.value||'').trim().toLowerCase();
       const rows = await fetchNotes();
       const filtered = q ? rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)) : rows;
-      
-      // Store data for later use when tab becomes visible
-      window._notesData = filtered;
       list.innerHTML = filtered.map(n=> `<li class="tx-item" data-id="${n.id}">
         <div>
           <div><strong>${(n.emoji? n.emoji+' ':'')}${(n.title||'(無標題)').replace(/[<>&]/g,'')}</strong>${n.pinned? ' <span class="badge">釘選</span>':''}${n.archived? ' <span class="badge">封存</span>':''}</div>
@@ -302,9 +299,6 @@
       }
       console.log('renderReminders: found #remindersList, rendering...');
       const rows = await fetchReminders();
-      
-      // Store data for later use when tab becomes visible
-      window._remindersData = rows;
       list.innerHTML = rows.map(r=> `<li class="tx-item" data-id="${r.id}">
         <div>
           <div><strong>${(r.title||'').replace(/[<>&]/g,'')}</strong> ${r.priority?`<span class=\"badge\">${r.priority}</span>`:''}</div>
@@ -1817,7 +1811,7 @@
     refresh();
     // tabs
     const tabs = $$('.tab-btn');
-    function showTab(name){
+    async function showTab(name){
       const all = Array.from(document.querySelectorAll('[data-tab]'));
       all.forEach(el=>{
         const isTarget = el.getAttribute('data-tab')===name;
@@ -1835,43 +1829,14 @@
       });
       
       // Re-render data when switching to notes or reminders tab
-      if(name === 'notes' && window._notesData) {
-        const list = $('#notesList');
-        if(list) {
-          const q = ($('#noteSearchInput')?.value||'').trim().toLowerCase();
-          const filtered = q ? window._notesData.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)) : window._notesData;
-          list.innerHTML = filtered.map(n=> `<li class="tx-item" data-id="${n.id}">
-            <div>
-              <div><strong>${(n.emoji? n.emoji+' ':'')}${(n.title||'(無標題)').replace(/[<>&]/g,'')}</strong>${n.pinned? ' <span class="badge">釘選</span>':''}${n.archived? ' <span class="badge">封存</span>':''}</div>
-              <small>${new Date(n.updatedAt||n.createdAt).toLocaleString()}${(n.tags&&n.tags.length)? ' ｜ '+n.tags.map(t=>`#${t}`).join(' ') : ''}</small>
-              <div>${(n.content||'').replace(/[<>&]/g,'')}</div>
-            </div>
-            <div class="tx-actions">
-              <button class="ghost" data-action="pin">${n.pinned?'取消釘選':'釘選'}</button>
-              <button class="ghost" data-action="archive">${n.archived?'取消封存':'封存'}</button>
-              <button class="ghost" data-action="tag">標籤</button>
-              <button class="ghost" data-action="edit">編輯</button>
-              <button class="ghost danger" data-action="delete">刪除</button>
-            </div>
-          </li>`).join('');
-        }
+      if(name === 'notes') {
+        console.log('Switching to notes tab, re-rendering...');
+        await renderNotes();
       }
       
-      if(name === 'reminders' && window._remindersData) {
-        const list = $('#remindersList');
-        if(list) {
-          list.innerHTML = window._remindersData.map(r=> `<li class="tx-item" data-id="${r.id}">
-            <div>
-              <div><strong>${(r.title||'').replace(/[<>&]/g,'')}</strong> ${r.priority?`<span class=\"badge\">${r.priority}</span>`:''}</div>
-              <small>${r.dueAt ? new Date(r.dueAt).toLocaleString() : '無期限'}${(r.tags&&r.tags.length)? ' ｜ '+r.tags.map(t=>`#${t}`).join(' ') : ''}</small>
-              ${r.note?`<div>${r.note.replace(/[<>&]/g,'')}</div>`:''}
-            </div>
-            <div class="tx-actions">
-              <button class="ghost" data-action="edit">編輯</button>
-              <button class="ghost danger" data-action="delete">刪除</button>
-            </div>
-          </li>`).join('');
-        }
+      if(name === 'reminders') {
+        console.log('Switching to reminders tab, re-rendering...');
+        await renderReminders();
       }
     }
     const indicator = document.getElementById('tabIndicator');
@@ -1891,24 +1856,19 @@
       indicator.style.width = `${w}px`;
       indicator.style.transform = `translateX(${Math.max(0,x)}px)`;
     }
-    tabs.forEach(btn=> btn.addEventListener('click', ()=>{
+    tabs.forEach(btn=> btn.addEventListener('click', async ()=>{
       // haptic-like micro interaction on mobile
       try{ if('vibrate' in navigator) navigator.vibrate?.(10); }catch(_){ }
       const name = btn.getAttribute('data-tab-target');
-      showTab(name);
+      await showTab(name);
       moveIndicator(name);
       try{ location.hash = `#tab=${name}`; }catch(_){ }
     }));
     // hash routing: #tab=ledger|stats|calendar|assistant|notes|reminders
     const hashTab = (location.hash.match(/tab=([a-z]+)/)||[])[1];
     const initial = ['ledger','stats','calendar','assistant','notes','reminders'].includes(hashTab) ? hashTab : 'ledger';
-    showTab(initial);
+    await showTab(initial);
     moveIndicator(initial);
-    // Initial render notes/reminders (render without showing tabs)
-    try{ 
-      await renderNotes(); 
-      await renderReminders(); 
-    }catch(_){ }
     // Quick jump
     $('#goNotesBtn')?.addEventListener('click', ()=>{
       document.getElementById('notesPanel')?.scrollIntoView({ behavior:'smooth', block:'start' });
