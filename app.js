@@ -1818,9 +1818,13 @@
       const name = btn.getAttribute('data-tab-target');
       showTab(name);
       moveIndicator(name);
+      try{ location.hash = `#tab=${name}`; }catch(_){ }
     }));
-    showTab('ledger');
-    moveIndicator('ledger');
+    // hash routing: #tab=ledger|stats|calendar|assistant|notes|reminders
+    const hashTab = (location.hash.match(/tab=([a-z]+)/)||[])[1];
+    const initial = ['ledger','stats','calendar','assistant','notes','reminders'].includes(hashTab) ? hashTab : 'ledger';
+    showTab(initial);
+    moveIndicator(initial);
     // Initial render notes/reminders
     try{ renderNotes(); renderReminders(); }catch(_){ }
     // Quick jump

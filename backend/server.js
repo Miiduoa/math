@@ -88,6 +88,8 @@ const fileStore = {
         const cats = readJson(path.join(oldDir,'categories.json'), null); if(cats) writeJson(path.join(newDir,'categories.json'), cats);
         const set = readJson(path.join(oldDir,'settings.json'), null); if(set) writeJson(path.join(newDir,'settings.json'), set);
         const model = readJson(path.join(oldDir,'model.json'), null); if(model) writeJson(path.join(newDir,'model.json'), model);
+        const notes = readJson(path.join(oldDir,'notes.json'), null); if(Array.isArray(notes)) writeJson(path.join(newDir,'notes.json'), notes);
+        const reminders = readJson(path.join(oldDir,'reminders.json'), null); if(Array.isArray(reminders)) writeJson(path.join(newDir,'reminders.json'), reminders);
         writeJson(path.join(newDir,'transactions.json'), oldTx);
         return true;
       }
@@ -536,7 +538,7 @@ function menuFlexBubble({ baseUrl='' }){
     ],
     // 網頁
     [
-      { label:'開啟網頁版', uri: baseUrl||'https://example.com', style:'link' }
+      { label:'開啟網頁版', uri: (baseUrl||'https://example.com').replace(/\/$/,'/')+'/#tab=ledger', style:'link' }
     ]
   ];
   const contents = [];
@@ -1867,7 +1869,7 @@ const server = http.createServer(async (req, res) => {
       }catch(_){ targets = []; }
       // Fallback: if no targets, but admin id exists, at least send to admin
       if(targets.length===0 && ADMIN_LINE_USER_ID){ targets=[ADMIN_LINE_USER_ID]; }
-      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'系統公告', subtitle: new Date().toLocaleString('zh-TW'), lines:[ String(message) ], buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri: getBaseUrl(req)||'https://example.com' } } ], showHero:false, compact:true });
+      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req), title:'系統公告', subtitle: new Date().toLocaleString('zh-TW'), lines:[ String(message) ], buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri: (getBaseUrl(req)||'https://example.com').replace(/\/$/,'/')+'/#tab=ledger' } } ], showHero:false, compact:true });
       let success=0;
       for(const to of targets){
         const ok = await linePush(to, [{ type:'flex', altText:'系統公告', contents:bubble }]);
@@ -1977,7 +1979,7 @@ const server = http.createServer(async (req, res) => {
       if(!hasKey){ res.writeHead(403, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'forbidden' })); }
       if(!LINE_CHANNEL_ACCESS_TOKEN){ res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' }); return res.end(JSON.stringify({ ok:false, error:'missing_access_token' })); }
       const to = ADMIN_LINE_USER_ID;
-      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'Ping 測試', subtitle:new Date().toLocaleString('zh-TW'), lines:['這是一則測試訊息','請點選下方按鈕驗證動作'], buttons:[ { style:'primary', action:{ type:'postback', label:'功能選單', data:'flow=menu' } }, { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+      const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'Ping 測試', subtitle:new Date().toLocaleString('zh-TW'), lines:['這是一則測試訊息','請點選下方按鈕驗證動作'], buttons:[ { style:'primary', action:{ type:'postback', label:'功能選單', data:'flow=menu' } }, { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=ledger' } } ], showHero:false, compact:true });
       const ok = await linePush(to, [{ type:'flex', altText:'Ping 測試', contents:bubble }]);
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok }));
@@ -2794,12 +2796,37 @@ const server = http.createServer(async (req, res) => {
                   continue;
                 }
                 if(st.step==='due'){
-                  // allow free text date
-                  const m = text.match(/(20\d{2}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
-                  if(m){
-                    const iso = m[1] + (m[2]?`T${m[2]}:00`:'T00:00:00');
-                    try{ st.rec.dueAt = new Date(iso).toISOString(); }catch(_){ st.rec.dueAt=''; }
-                  }else if(/無期限|無|略過/.test(text)){ st.rec.dueAt=''; }
+                  // allow free text date: 支援 今天/明天/後天/本週X/下週X/月底 + 時/點/時段
+                  const d = new Date();
+                  const setTime = (h=9,m=0)=>{ d.setHours(h,m,0,0); };
+                  let matched=false;
+                  if(/無期限|無|略過/.test(text)){ st.rec.dueAt=''; matched=true; }
+                  if(!matched){
+                    if(/今天/.test(text)){ matched=true; }
+                    else if(/明天/.test(text)){ d.setDate(d.getDate()+1); matched=true; }
+                    else if(/後天/.test(text)){ d.setDate(d.getDate()+2); matched=true; }
+                    else{
+                      const wmap={ '日':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6 };
+                      const m1=text.match(/本週([日一二三四五六])/); const m2=text.match(/下週([日一二三四五六])/);
+                      if(m1){ const t=wmap[m1[1]]; const cur=d.getDay(); const add=(t-cur+7)%7; d.setDate(d.getDate()+add); matched=true; }
+                      else if(m2){ const t=wmap[m2[1]]; const cur=d.getDay(); const add=((t - cur + 7) % 7) + 7; d.setDate(d.getDate()+add); matched=true; }
+                      else if(/月底/.test(text)){ d.setMonth(d.getMonth()+1, 0); matched=true; }
+                    }
+                  }
+                  const mH = text.match(/(早上|上午|早|中午|下午|傍晚|晚上)?\s*(\d{1,2})\s*(點|時)(?:\s*(\d{1,2})\s*分)?/);
+                  if(mH){
+                    let h=Number(mH[2])||9; const mm=Number(mH[4])||0; const zh=String(mH[1]||'');
+                    if(/下午|傍晚|晚上/.test(zh) && h<12) h+=12; if(/中午/.test(zh) && h===12) h=12; if(/早上|上午|早/.test(zh) && h===12) h=0;
+                    setTime(h,mm); matched=true;
+                  }else{
+                    const mHM = text.match(/\b(\d{1,2}):(\d{2})\b/);
+                    if(mHM){ setTime(Number(mHM[1])||9, Number(mHM[2])||0); matched=true; }
+                  }
+                  // ISO yyyy-mm-dd or yyyy-mm-dd hh:mm
+                  const mISO = text.match(/(20\d{2}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
+                  if(mISO){ const iso = mISO[1] + (mISO[2]?`T${mISO[2]}:00`:'T00:00:00'); try{ st.rec.dueAt = new Date(iso).toISOString(); matched=true; }catch(_){ } }
+                  if(!matched){ setTime(9,0); }
+                  if(matched && !mISO){ try{ st.rec.dueAt = d.toISOString(); }catch(_){ st.rec.dueAt=''; } }
                   st.step='repeat'; remFlow.set(uid, st);
                   const bubble = buildRemRepeatPrompt(getBaseUrl(req)||'');
                   await lineReply(replyToken, [{ type:'flex', altText:'設定週期', contents:bubble }]);
@@ -3149,7 +3176,7 @@ const server = http.createServer(async (req, res) => {
                 lines:[ '查看本月每日收入/支出概況，於網頁版可互動篩選。' ],
                 buttons:[
                   { style:'secondary', color:'#64748b', action:{ type:'message', label:'最近交易', text:'最近交易' } },
-                  { style:'link', action:{ type:'uri', label:'開啟月曆', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } }
+                  { style:'link', action:{ type:'uri', label:'開啟月曆', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=calendar' } }
                 ],
                 showHero:false,
                 compact:true
@@ -3230,7 +3257,7 @@ const server = http.createServer(async (req, res) => {
                 if(!isDbEnabled()){
                   const rows = getNotes(uid).slice(0,5);
                   const lines = rows.length? rows.map(n=> `${new Date(n.updatedAt||n.createdAt).toLocaleString()}｜${(n.title||'').slice(0,20)}${n.title?'：':''}${(n.content||'').slice(0,40)}`) : ['目前沒有記事'];
-                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'記事清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'記事清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=notes' } } ], showHero:false, compact:true });
                   await lineReply(replyToken, [{ type:'flex', altText:'記事清單', contents:bubble }]);
                   continue;
                 }
@@ -3273,7 +3300,7 @@ const server = http.createServer(async (req, res) => {
                 if(!isDbEnabled()){
                   const rows = getReminders(uid).slice(0,5);
                   const lines = rows.length? rows.map(r=> `${r.dueAt?new Date(r.dueAt).toLocaleString():'無期限'}｜${r.title}`) : ['目前沒有提醒'];
-                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'提醒清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/') } } ], showHero:false, compact:true });
+                  const bubble = glassFlexBubble({ baseUrl:getBaseUrl(req)||PUBLIC_BASE_URL||'', title:'提醒清單（最近）', subtitle:`筆數：${rows.length}`, lines, buttons:[ { style:'link', action:{ type:'uri', label:'開啟網頁版', uri:(getBaseUrl(req)||PUBLIC_BASE_URL||'').replace(/\/$/,'/')+'/#tab=reminders' } } ], showHero:false, compact:true });
                   await lineReply(replyToken, [{ type:'flex', altText:'提醒清單', contents:bubble }]);
                   continue;
                 }
