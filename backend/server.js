@@ -251,6 +251,12 @@ function isGeminiEnabled(){ return !!String(process.env.GEMINI_API_KEY||process.
 function getGeminiApiKey(){ return String(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||'').trim(); }
 function getGeminiModelChat(){ return String(process.env.GEMINI_MODEL_CHAT||process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-1.5-pro'); }
 function getGeminiModelStruct(){ return String(process.env.GEMINI_MODEL_STRUCT||process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-1.5-pro'); }
+function getGeminiFallbackModels(kind){
+  const prim = kind==='struct' ? getGeminiModelStruct() : getGeminiModelChat();
+  const envList = String(kind==='struct'? (process.env.GEMINI_FALLBACK_STRUCT||'') : (process.env.GEMINI_FALLBACK_CHAT||'')).split(',').map(s=>s.trim()).filter(Boolean);
+  const defaults = uniq([ prim, `${prim}-latest`, 'gemini-1.5-pro', 'gemini-1.5-pro-latest', 'gemini-1.5-flash', 'gemini-1.5-flash-latest' ]);
+  return envList.length? uniq([ ...envList, ...defaults ]) : defaults;
+}
 function geminiHost(){ return 'generativelanguage.googleapis.com'; }
 function toGeminiContents(messages){
   const out=[];
@@ -287,6 +293,17 @@ async function geminiGenerate(model, messages, sysText, opts){
   const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, { contents, systemInstruction, generationConfig });
   const txt = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
   return { ok: !!txt, text: txt, status: r.status, raw: r.json };
+}
+async function geminiGenerateFirst(kind, messages, sysText, opts){
+  const tried = [];
+  for(const m of getGeminiFallbackModels(kind)){
+    try{
+      const r = await geminiGenerate(m, messages, sysText, opts);
+      if(r && r.ok) return { ok:true, text:r.text, model:m };
+    }catch(_){ }
+    tried.push(m);
+  }
+  return { ok:false, tried };
 }
 function cosine(a,b){ let s=0,na=0,nb=0; const n=Math.min(a.length,b.length); for(let i=0;i<n;i++){ const x=a[i]||0, y=b[i]||0; s+=x*y; na+=x*x; nb+=y*y; } const d=(Math.sqrt(na)||1)*(Math.sqrt(nb)||1); return s/d; }
 async function upsertNoteVector(userId, note){
@@ -1845,7 +1862,7 @@ async function aiChatText(userText, context){
     // Gemini official path
     if(isGeminiEnabled()){
       const sys = 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.';
-      const r = await geminiGenerate(getGeminiModelChat(), [ { role:'user', content:String(userText||'') } ], sys, { temperature:0.4, max_tokens:800 });
+      const r = await geminiGenerateFirst('chat', [ { role:'user', content:String(userText||'') } ], sys, { temperature:0.4, max_tokens:800 });
       if(r && r.ok) return r.text;
       return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
     }
@@ -2351,35 +2368,32 @@ const server = http.createServer(async (req, res) => {
       // Gemini branch (prefer if configured)
       if(isGeminiEnabled()){
         try{
-          const model = (mode==='struct')? getGeminiModelStruct() : getGeminiModelChat();
           let sys = '';
           if(mode==='struct'){
             sys = `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD)，categoryName(string 可省略), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。不要其他文字。`;
+            const mm = [ { role:'user', content: messages?.[0]?.content||'' } ];
+            for(const m of getGeminiFallbackModels('struct')){
+              const contents = toGeminiContents(mm);
+              const systemInstruction = { parts:[ { text: sys } ] };
+              const generationConfig = { temperature:0, responseMimeType:'application/json' };
+              const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(m)}:generateContent`, { contents, systemInstruction, generationConfig });
+              const outText = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
+              try{
+                const raw = JSON.parse(outText);
+                const normalized = validateAndNormalizeStruct(raw);
+                const merged = mergeParsedAmountFromText(messages?.[0]?.content||'', normalized);
+                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                return res.end(JSON.stringify({ ok:true, provider:'gemini', parsed: merged, model:m }));
+              }catch(_){ /* try next */ }
+            }
           }else{
             sys = 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.';
-          }
-          const mm = (mode==='struct')? [ { role:'user', content: messages?.[0]?.content||'' } ] : messages;
-          let outText = '';
-          if(mode==='struct'){
-            const contents = toGeminiContents(mm);
-            const systemInstruction = { parts:[ { text: sys } ] };
-            const generationConfig = { temperature:0, responseMimeType:'application/json' };
-            const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, { contents, systemInstruction, generationConfig });
-            outText = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
-            try{
-              const raw = JSON.parse(outText);
-              const normalized = validateAndNormalizeStruct(raw);
-              const merged = mergeParsedAmountFromText(messages?.[0]?.content||'', normalized);
+            const mm = messages;
+            const r = await geminiGenerateFirst('chat', mm, sys, { temperature:0.4, max_tokens:800 });
+            if(r && r.ok){
               res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-              return res.end(JSON.stringify({ ok:true, provider:'gemini', parsed: merged }));
-            }catch(_){ /* fallthrough */ }
-          }else{
-            const r = await geminiGenerate(model, mm, sys, { temperature:0.4, max_tokens:800 });
-            if(r && r.ok) outText = r.text;
-          }
-          if(outText){
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            return res.end(JSON.stringify({ ok: true, provider: 'gemini', reply: outText }));
+              return res.end(JSON.stringify({ ok: true, provider: 'gemini', reply: r.text, model: r.model }));
+            }
           }
         }catch(_){ /* continue to fallback */ }
       }
