@@ -232,6 +232,49 @@ async function createEmbedding(input){
   }
   const norm = Math.sqrt(vec.reduce((a,b)=>a+b*b,0))||1; return vec.map(x=> x/norm);
 }
+
+// Gemini (Google official) helpers
+function isGeminiEnabled(){ return !!String(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||'').trim(); }
+function getGeminiApiKey(){ return String(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||'').trim(); }
+function getGeminiModelChat(){ return String(process.env.GEMINI_MODEL_CHAT||process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-1.5-pro'); }
+function getGeminiModelStruct(){ return String(process.env.GEMINI_MODEL_STRUCT||process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-1.5-pro'); }
+function geminiHost(){ return 'generativelanguage.googleapis.com'; }
+function toGeminiContents(messages){
+  const out=[];
+  for(const m of (messages||[])){
+    const role = (m.role==='assistant')?'model':'user';
+    if(m.role==='system') continue; // handled via systemInstruction
+    const text = String(m.content||'');
+    out.push({ role, parts:[ { text } ] });
+  }
+  return out;
+}
+function systemFromMessages(messages, extra=''){
+  const sys = (messages||[]).filter(m=>m&&m.role==='system').map(m=>String(m.content||''));
+  if(extra) sys.push(String(extra));
+  return sys.join('\n');
+}
+function geminiRequest(pathname, body){
+  return new Promise((resolve)=>{
+    const key = getGeminiApiKey();
+    const data = Buffer.from(JSON.stringify(body||{}));
+    const req = https.request({ hostname: geminiHost(), path: `${pathname}?key=${encodeURIComponent(key)}`, method:'POST', headers:{ 'Content-Type':'application/json', 'Content-Length': data.length } }, (resp)=>{
+      let raw=''; resp.setEncoding('utf8');
+      resp.on('data', c=>{ raw += c; if(raw.length>800000) raw=raw.slice(-800000); });
+      resp.on('end', ()=>{ try{ resolve({ status: resp.statusCode||0, json: JSON.parse(raw) }); }catch(_){ resolve({ status: resp.statusCode||0, json:null, raw }); } });
+    });
+    req.on('error', ()=> resolve({ status:0, json:null }));
+    req.write(data); req.end();
+  });
+}
+async function geminiGenerate(model, messages, sysText, opts){
+  const contents = toGeminiContents(messages);
+  const systemInstruction = sysText ? { parts:[ { text: String(sysText) } ] } : undefined;
+  const generationConfig = { temperature: (opts&&Number.isFinite(opts.temperature)? opts.temperature: 0.4), maxOutputTokens: (opts&&Number.isFinite(opts.max_tokens)? opts.max_tokens: 1000) };
+  const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, { contents, systemInstruction, generationConfig });
+  const txt = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
+  return { ok: !!txt, text: txt, status: r.status, raw: r.json };
+}
 function cosine(a,b){ let s=0,na=0,nb=0; const n=Math.min(a.length,b.length); for(let i=0;i<n;i++){ const x=a[i]||0, y=b[i]||0; s+=x*y; na+=x*x; nb+=y*y; } const d=(Math.sqrt(na)||1)*(Math.sqrt(nb)||1); return s/d; }
 async function upsertNoteVector(userId, note){
   try{
@@ -1735,9 +1778,23 @@ function validateAndNormalizeStruct(input){
 }
 
 async function aiStructParse(text, context){
+  // Prefer Gemini if configured
+  if(isGeminiEnabled()){
+    try{
+      const model = getGeminiModelStruct();
+      const sys = `你是專業的記帳解析器，輸出嚴格 JSON（無多餘文字）。欄位: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD), categoryName(string 可省略), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。嚴禁將日期/時間/序數視為金額。`;
+      // Ask Gemini to return JSON by setting responseMimeType
+      const contents = toGeminiContents([ { role:'user', content:String(text||'') } ]);
+      const systemInstruction = { parts:[ { text: sys } ] };
+      const generationConfig = { temperature:0, responseMimeType:'application/json' };
+      const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(getGeminiModelStruct())}:generateContent`, { contents, systemInstruction, generationConfig });
+      const outText = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
+      try{ return JSON.parse(outText); }catch(_){ return null; }
+    }catch(_){ return null; }
+  }
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-1.5-pro';
   if(!OPENAI_API_KEY){ return null; }
   const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
   const categoriesHint = catNames.length>0 ? `有效分類（優先從此清單選擇 categoryName；對不到可輸出新的文字並由前端建立）：${catNames.join(', ')}` : '';
@@ -1772,9 +1829,16 @@ ${categoriesHint}
 
 async function aiChatText(userText, context){
   try{
+    // Gemini official path
+    if(isGeminiEnabled()){
+      const sys = 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.';
+      const r = await geminiGenerate(getGeminiModelChat(), [ { role:'user', content:String(userText||'') } ], sys, { temperature:0.4, max_tokens:800 });
+      if(r && r.ok) return r.text;
+      return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
+    }
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
     const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-    const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+    const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-1.5-pro';
     if(!OPENAI_API_KEY){
       return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
     }
@@ -1810,7 +1874,7 @@ async function diagUpstreamChat(){
     const rawBase = (process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1');
     const base = String(rawBase).replace(/\/+$/,'');
     const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
-    const model = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+    const model = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-1.5-pro';
     if(!OPENAI_API_KEY){ return { ok:false, reason:'no_api_key', providerBase: apiBase, model }; }
     const url = new URL(`${apiBase}/chat/completions`);
     const payload = {
@@ -1856,7 +1920,7 @@ function getOpenAIClient(){
 
 async function callWithModelFallback(fn){
   const primary = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gemini-2.5-flash';
+  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gemini-1.5-flash';
   try{ return await fn(primary); }catch(_){ }
   try{ return await fn(fallback); }catch(_){ }
   return { ok:false, output:'', error:'provider_error' };
@@ -2268,10 +2332,46 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
-      const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-1.5-pro';
+      const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gemini-1.5-pro';
 
-      // Fallback: simple heuristic response if no key configured
+      // Gemini branch (prefer if configured)
+      if(isGeminiEnabled()){
+        try{
+          const model = (mode==='struct')? getGeminiModelStruct() : getGeminiModelChat();
+          let sys = '';
+          if(mode==='struct'){
+            sys = `你是一個記帳解析器，請輸出 JSON，包含: type(income|expense), amount(number), currency(string), date(YYYY-MM-DD)，categoryName(string 可省略), rate(number 可省略), claimAmount(number 可省略), claimed(boolean 可省略), note(string)。不要其他文字。`;
+          }else{
+            sys = 'You are a helpful finance and budgeting assistant for a personal ledger web app. Answer in Traditional Chinese.';
+          }
+          const mm = (mode==='struct')? [ { role:'user', content: messages?.[0]?.content||'' } ] : messages;
+          let outText = '';
+          if(mode==='struct'){
+            const contents = toGeminiContents(mm);
+            const systemInstruction = { parts:[ { text: sys } ] };
+            const generationConfig = { temperature:0, responseMimeType:'application/json' };
+            const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, { contents, systemInstruction, generationConfig });
+            outText = String(r?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
+            try{
+              const raw = JSON.parse(outText);
+              const normalized = validateAndNormalizeStruct(raw);
+              const merged = mergeParsedAmountFromText(messages?.[0]?.content||'', normalized);
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              return res.end(JSON.stringify({ ok:true, provider:'gemini', parsed: merged }));
+            }catch(_){ /* fallthrough */ }
+          }else{
+            const r = await geminiGenerate(model, mm, sys, { temperature:0.4, max_tokens:800 });
+            if(r && r.ok) outText = r.text;
+          }
+          if(outText){
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ ok: true, provider: 'gemini', reply: outText }));
+          }
+        }catch(_){ /* continue to fallback */ }
+      }
+
+      // Fallback: simple heuristic response if no OpenAI-compatible key configured
       if (!OPENAI_API_KEY) {
         const reply = heuristicReply(messages, context);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2351,15 +2451,15 @@ const server = http.createServer(async (req, res) => {
       const baseCandidates = getOpenAIBases();
       function fallbackList(){
         if(mode==='struct'){
-          const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-2.5-pro');
+          const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-1.5-pro');
           const envList = (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [prim, 'gemini-2.5-pro', 'gemini-2.5-flash', 'gpt-4o-mini'];
+          const defaults = [prim, 'gemini-1.5-pro', 'gemini-1.5-flash', 'gpt-4o-mini'];
           const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }else{
-          const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro');
+          const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-1.5-pro');
           const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [prim, 'gemini-2.5-pro', 'gemini-2.5-flash', 'gpt-4o-mini'];
+          const defaults = [prim, 'gemini-1.5-pro', 'gemini-1.5-flash', 'gpt-4o-mini'];
           const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }
@@ -2492,7 +2592,7 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-1.5-pro';
 
       // Prepare SSE response
       res.writeHead(200, {
@@ -2568,7 +2668,7 @@ const server = http.createServer(async (req, res) => {
         });
         const models = (function(){
           const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro','gemini-2.5-pro','gemini-2.5-flash'];
+          const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-1.5-pro','gemini-1.5-pro','gemini-1.5-flash'];
           return (envList.length? envList : defaults).filter(Boolean);
         })();
         outer: for(const apiBase of baseCandidates){
@@ -2785,7 +2885,7 @@ const server = http.createServer(async (req, res) => {
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
-        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gemini-2.5-pro', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'), aiToolsEnabled: isAiToolsEnabled(), simpleChatMode: isSimpleChatMode() },
+        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gemini-1.5-pro', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'), aiToolsEnabled: isAiToolsEnabled(), simpleChatMode: isSimpleChatMode() },
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean), fallbackStruct: (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean) }
@@ -2902,9 +3002,9 @@ const server = http.createServer(async (req, res) => {
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         hasOpenAIKey,
-        openaiModel: process.env.OPENAI_MODEL||'gemini-2.5-pro',
-        openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro',
-        openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-2.5-pro',
+        openaiModel: process.env.OPENAI_MODEL||'gemini-1.5-pro',
+        openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-1.5-pro',
+        openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-1.5-pro',
         openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'),
         aiToolsEnabled: isAiToolsEnabled(),
         aiSimpleMode: isSimpleChatMode()
