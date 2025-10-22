@@ -3,7 +3,7 @@
   const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
   const ADMIN_LINE_USER_ID = 'U5c7738d89a59ff402fd6b56f5472d351';
 
-  // Resolve API base URL for AI endpoints（優先使用設定的伺服器 URL，其次才用同源）
+  // Resolve API base URL for AI endpoints（優先使用設定的伺服器 URL，其次同源，最後雲端預設）
   function apiBase(preferred){
     try{
       const cand = String(preferred||'').trim();
@@ -17,8 +17,10 @@
       const origin = (typeof location!=='undefined' && /^https?:/.test(location.origin)) ? location.origin : '';
       if(origin) return origin.replace(/\/$/,'');
     }catch(_){ }
-    // Sensible default for local dev
-    return 'http://localhost:8787';
+    // Cloud default for portable usage
+    const fallback = (typeof window!=='undefined' && (window.DEFAULT_SERVER_URL||'')) || 'https://math-ei8s.onrender.com';
+    try{ if(!localStorage.getItem('serverUrl')) localStorage.setItem('serverUrl', fallback); }catch(_){ }
+    return fallback.replace(/\/$/,'');
   }
 
   function showDialogSafe(dialog){
@@ -1230,7 +1232,11 @@
         $('#savingsGoal').value = s.savingsGoalTWD||0;
         $('#nudgesToggle').checked = !!s.nudges;
         if($('#appearanceSelect')) $('#appearanceSelect').value = s.appearance || 'system';
-        if($('#serverUrl')) $('#serverUrl').value = s.serverUrl || '';
+        if($('#serverUrl')){
+          const defBase = s.serverUrl || apiBase('');
+          $('#serverUrl').value = defBase || '';
+          try{ if(defBase && !localStorage.getItem('serverUrl')) localStorage.setItem('serverUrl', defBase); }catch(_){ }
+        }
         // render per-category budgets
         try{
           const list = $('#categoryBudgetList');
