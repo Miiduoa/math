@@ -1781,6 +1781,46 @@ async function aiChatText(userText, context){
   }
 }
 
+// Upstream diagnostic: call provider directly and return status + snippet
+async function diagUpstreamChat(){
+  try{
+    const OPENAI_API_KEY = (process.env.OPENAI_API_KEY||'').trim();
+    const rawBase = (process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1');
+    const base = String(rawBase).replace(/\/+$/,'');
+    const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+    const model = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    if(!OPENAI_API_KEY){ return { ok:false, reason:'no_api_key', providerBase: apiBase, model }; }
+    const url = new URL(`${apiBase}/chat/completions`);
+    const payload = {
+      model,
+      messages: [ { role:'user', content:'ping' } ],
+      temperature: 0,
+      max_tokens: 16
+    };
+    const body = JSON.stringify(payload);
+    const isHttp = url.protocol==='http:';
+    const transport = isHttp? http : https;
+    const headers = { 'Content-Type':'application/json', 'Authorization':`Bearer ${OPENAI_API_KEY}` };
+    return await new Promise((resolve)=>{
+      try{
+        const reqUp = transport.request({ hostname:url.hostname, port:url.port|| (isHttp?80:443), path:url.pathname+url.search, method:'POST', headers }, (resp)=>{
+          let raw='';
+          resp.setEncoding('utf8');
+          resp.on('data', (c)=>{ raw += c; if(raw.length>4000){ raw = raw.slice(0,4000); } });
+          resp.on('end', ()=>{
+            let parsedError=null, parsedOk=null;
+            try{ const j = JSON.parse(raw); if(j && j.error) parsedError=j.error; else parsedOk=j; }catch(_){ }
+            resolve({ ok: resp.statusCode && resp.statusCode<400, status: resp.statusCode||0, providerBase: apiBase, model, bodySnippet: raw, parsedError, parsedOk });
+          });
+        });
+        reqUp.on('error', (err)=> resolve({ ok:false, providerBase: apiBase, model, error:String(err&&err.message||err) }));
+        reqUp.write(body);
+        reqUp.end();
+      }catch(err){ resolve({ ok:false, providerBase: apiBase, model, error:String(err&&err.message||err) }); }
+    });
+  }catch(err){ return { ok:false, error:String(err&&err.message||err) }; }
+}
+
 function getOpenAIClient(){
   try{
     const apiKey = process.env.OPENAI_API_KEY || '';
@@ -2682,6 +2722,13 @@ const server = http.createServer(async (req, res) => {
       }catch(err){ out.tests.embeddings = { ok:false, error:String(err?.message||err) }; }
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));
+    }
+
+    // AI upstream diagnostic (no auth; returns upstream status + snippet, never includes secrets)
+    if ((req.method === 'GET' || req.method==='POST') && reqPath === '/api/ai/diag'){
+      const r = await diagUpstreamChat();
+      res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(r));
     }
 
     // Admin: view effective config/toggles
