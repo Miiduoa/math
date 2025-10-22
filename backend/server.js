@@ -2319,8 +2319,23 @@ const server = http.createServer(async (req, res) => {
               data = await fetchJson(endpoint, { method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(follow) }, 20000);
               message = data?.choices?.[0]?.message || message;
             }
+            // Fallback: some providers may not return content when tools are present; retry without tools
+            let content = String(message?.content||'');
+            if(!content && mode!=='struct'){
+              try{
+                const payloadNoTools = { ...payloadBase, model: mdl };
+                delete payloadNoTools.tools; delete payloadNoTools.tool_choice;
+                const d2 = await fetchJson(endpoint, { method:'POST', headers:{ 'Authorization':`Bearer ${OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify(payloadNoTools) }, 20000);
+                const m2 = d2?.choices?.[0]?.message || {};
+                content = String(m2?.content||'');
+              }catch(_){ /* ignore */ }
+            }
             if(mode==='struct') runtimeAiStatus.lastModelStruct = mdl; else runtimeAiStatus.lastModelChat = mdl;
-            return message?.content || '';
+            if(!content && mode!=='struct'){
+              // Provide a graceful message when provider returns empty content
+              try{ return heuristicReply(messages, context); }catch(_){ return ''; }
+            }
+            return content;
           }catch(err){ lastErr = err; continue; }
         }
         runtimeAiStatus.lastError = String(lastErr?.message||lastErr||'unknown');
@@ -2337,7 +2352,22 @@ const server = http.createServer(async (req, res) => {
             const merged = mergeParsedAmountFromText(messages?.[0]?.content||'', normalized);
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             return res.end(JSON.stringify({ ok:true, provider:'openai', parsed: merged }));
-          }catch(_){ /* fallthrough to plain text */ }
+          }catch(_){
+            // If upstream returns non-JSON or empty, fallback to local NLP parsing
+            const rawText = String(messages?.[0]?.content||'');
+            const local = parseNlpQuick(rawText);
+            const parsed = validateAndNormalizeStruct({
+              type: local.type||'expense',
+              amount: Number.isFinite(Number(local.amount)) ? Number(local.amount) : undefined,
+              currency: local.currency || 'TWD',
+              date: local.date || undefined,
+              claimAmount: Number.isFinite(Number(local.claimAmount)) ? Number(local.claimAmount) : undefined,
+              claimed: typeof local.claimed==='boolean' ? local.claimed : undefined,
+              note: rawText
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ ok:true, provider:'fallback', parsed }));
+          }
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ ok: true, provider: 'openai', reply }));

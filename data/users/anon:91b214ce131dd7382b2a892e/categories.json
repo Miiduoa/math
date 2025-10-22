@@ -1,0 +1,18 @@
+[
+  {
+    "id": "food",
+    "name": "餐飲"
+  },
+  {
+    "id": "transport",
+    "name": "交通"
+  },
+  {
+    "id": "shopping",
+    "name": "購物"
+  },
+  {
+    "id": "salary",
+    "name": "薪資"
+  }
+]
