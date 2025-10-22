@@ -202,6 +202,19 @@ function getOpenAIBases(){
   return uniq(list.filter(Boolean));
 }
 async function createEmbedding(input){
+  // Prefer Google Gemini official embeddings when configured
+  try{
+    if(isGeminiEnabled()){
+      const model = String(process.env.GEMINI_EMBEDDING_MODEL||'text-embedding-004');
+      const text = String(input||'');
+      const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:embedContent`, {
+        content: { parts:[ { text } ] }
+      });
+      const values = r?.json?.embedding?.values;
+      if(Array.isArray(values) && values.length>0){ return values.map(v=> Number(v)||0); }
+      // fall through to OpenAI-style or hashed if not available
+    }
+  }catch(_){ /* ignore and fall back */ }
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const base = getOpenAIBase();
   if(!OPENAI_API_KEY){
@@ -2843,11 +2856,16 @@ const server = http.createServer(async (req, res) => {
         out.tests.struct = { ok: !!(j2 && j2.ok && j2.parsed), parsed: j2?.parsed||null };
       }catch(err){ out.tests.struct = { ok:false, error:String(err?.message||err) }; }
       try{
-        if((process.env.OPENAI_API_KEY||'').trim()){
+        if(isGeminiEnabled()){
+          const model = String(process.env.GEMINI_EMBEDDING_MODEL||'text-embedding-004');
+          const r = await geminiRequest(`/v1beta/models/${encodeURIComponent(model)}:embedContent`, { content:{ parts:[ { text:'hello' } ] } });
+          const vals = r?.json?.embedding?.values;
+          out.tests.embeddings = { ok: Array.isArray(vals)&&vals.length>0, dim: Array.isArray(vals)? vals.length: 0, provider:'gemini' };
+        } else if((process.env.OPENAI_API_KEY||'').trim()){
           const base = (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1').replace(/\/+$/,'');
           const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
           const r = await fetchJson(`${apiBase}/embeddings`,{ method:'POST', headers:{ 'Authorization':`Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify({ model: process.env.EMBEDDING_MODEL||'text-embedding-3-small', input:'hello' }) }, 12000);
-          out.tests.embeddings = { ok: !!(r && r.data && r.data[0] && Array.isArray(r.data[0].embedding)), dim: (r?.data?.[0]?.embedding||[]).length };
+          out.tests.embeddings = { ok: !!(r && r.data && r.data[0] && Array.isArray(r.data[0].embedding)), dim: (r?.data?.[0]?.embedding||[]).length, provider:'openai' };
         } else { out.tests.embeddings = { ok:false, error:'no_api_key' }; }
       }catch(err){ out.tests.embeddings = { ok:false, error:String(err?.message||err) }; }
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
