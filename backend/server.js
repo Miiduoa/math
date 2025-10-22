@@ -398,12 +398,19 @@ function buildToolsSpec(){
   return [
     { type:'function', function:{ name:'get_transactions', description:'查詢交易清單', parameters:{ type:'object', properties:{ since:{type:'string', description:'起始日期 YYYY-MM-DD'}, until:{type:'string', description:'結束日期 YYYY-MM-DD'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, top:{type:'number'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'add_transaction', description:'新增一筆交易', parameters:{ type:'object', properties:{ date:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, currency:{type:'string'}, rate:{type:'number'}, amount:{type:'number'}, claimAmount:{type:'number'}, claimed:{type:'boolean'}, emotion:{type:'string'}, motivation:{type:'string'}, note:{type:'string'} }, required:['date','type','categoryId','amount'], additionalProperties:false } } },
+    { type:'function', function:{ name:'update_transaction', description:'更新一筆交易（用 id 或條件匹配）', parameters:{ type:'object', properties:{ id:{type:'string'}, criteria:{ type:'object', properties:{ date:{type:'string'}, amount:{type:'number'}, noteContains:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'} }, additionalProperties:false }, patch:{ type:'object', properties:{ date:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, currency:{type:'string'}, rate:{type:'number'}, amount:{type:'number'}, claimAmount:{type:'number'}, claimed:{type:'boolean'}, emotion:{type:'string'}, motivation:{type:'string'}, note:{type:'string'} }, additionalProperties:false } }, additionalProperties:false } } },
+    { type:'function', function:{ name:'delete_transaction', description:'刪除一筆交易（用 id 或條件匹配）', parameters:{ type:'object', properties:{ id:{type:'string'}, criteria:{ type:'object', properties:{ date:{type:'string'}, amount:{type:'number'}, noteContains:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'} }, additionalProperties:false } }, additionalProperties:false } } },
+    { type:'function', function:{ name:'mark_claimed', description:'標記請款狀態', parameters:{ type:'object', properties:{ id:{type:'string'}, claimed:{type:'boolean'}, claimAmount:{type:'number'} }, required:['id','claimed'], additionalProperties:false } } },
     { type:'function', function:{ name:'get_notes', description:'查詢記事', parameters:{ type:'object', properties:{ q:{type:'string'}, top:{type:'number'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'add_note', description:'新增記事', parameters:{ type:'object', properties:{ title:{type:'string'}, content:{type:'string'}, tags:{type:'array', items:{type:'string'}}, emoji:{type:'string'}, color:{type:'string'}, pinned:{type:'boolean'} }, required:['content'], additionalProperties:false } } },
     { type:'function', function:{ name:'get_stats', description:'取得統計（收入/支出/結餘、未請款、分類排名）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM（優先）'}, since:{type:'string'}, until:{type:'string'}, mode:{type:'string', enum:['range','month'], description:'預設自動'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'budget_delta', description:'計算本月或指定月份與預算差額（TWD）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM；空則當月'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'category_ranking', description:'各分類排行', parameters:{ type:'object', properties:{ month:{type:'string'}, since:{type:'string'}, until:{type:'string'}, type:{type:'string', enum:['expense','income'], description:'預設 expense'}, top:{type:'number'} }, additionalProperties:false } } },
-    { type:'function', function:{ name:'quick_report', description:'輸出快速月報（HTML 與摘要）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM；空則當月'} }, additionalProperties:false } } }
+    { type:'function', function:{ name:'quick_report', description:'輸出快速月報（HTML 與摘要）', parameters:{ type:'object', properties:{ month:{type:'string', description:'YYYY-MM；空則當月'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'list_reminders', description:'查詢提醒事項', parameters:{ type:'object', properties:{ top:{type:'number'}, done:{type:'boolean'} }, additionalProperties:false } } },
+    { type:'function', function:{ name:'add_reminder', description:'新增提醒事項', parameters:{ type:'object', properties:{ title:{type:'string'}, dueAt:{type:'string'}, repeat:{type:'string', enum:['none','daily','weekly','monthly']}, weekdays:{type:'array', items:{type:'number'}}, monthDay:{type:'number'}, priority:{type:'string', enum:['low','medium','high']}, tags:{type:'array', items:{type:'string'}}, note:{type:'string'} }, required:['title'], additionalProperties:false } } },
+    { type:'function', function:{ name:'update_reminder', description:'更新提醒事項', parameters:{ type:'object', properties:{ id:{type:'string'}, patch:{ type:'object', properties:{ title:{type:'string'}, dueAt:{type:'string'}, repeat:{type:'string', enum:['none','daily','weekly','monthly']}, weekdays:{type:'array', items:{type:'number'}}, monthDay:{type:'number'}, priority:{type:'string', enum:['low','medium','high']}, tags:{type:'array', items:{type:'string'}}, note:{type:'string'}, done:{type:'boolean'} }, additionalProperties:false } }, required:['id','patch'], additionalProperties:false } } },
+    { type:'function', function:{ name:'delete_reminder', description:'刪除提醒事項', parameters:{ type:'object', properties:{ id:{type:'string'} }, required:['id'], additionalProperties:false } } }
   ];
 }
 async function callToolByName(name, args, uid){
@@ -416,6 +423,17 @@ async function callToolByName(name, args, uid){
     async function loadTx(){ return await (isDbEnabled()? pgdb.getTransactions(uid) : fileStore.getTransactions(uid)); }
     async function loadCats(){ return await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid)); }
     async function loadSettings(){ return await (isDbEnabled()? pgdb.getSettings(uid) : fileStore.getSettings(uid)); }
+    async function loadReminders(){ return await (isDbEnabled()? pgdb.getReminders(uid) : getReminders(uid)); }
+    function pickBestTx(rows, criteria){
+      if(!criteria) return rows[0]||null;
+      let candidates = rows;
+      if(criteria.type){ candidates = candidates.filter(t=> t.type===criteria.type); }
+      if(criteria.categoryId){ candidates = candidates.filter(t=> t.categoryId===criteria.categoryId); }
+      if(criteria.date){ candidates = candidates.filter(t=> String(t.date||'')===String(criteria.date)); }
+      if(Number.isFinite(Number(criteria.amount))){ const a=Number(criteria.amount); candidates = candidates.filter(t=> Math.abs(Number(t.amount||0)-a) < 1e-6); }
+      if(criteria.noteContains){ const q=String(criteria.noteContains).toLowerCase(); candidates = candidates.filter(t=> String(t.note||'').toLowerCase().includes(q)); }
+      return candidates[0]||null;
+    }
 
     if(name==='get_transactions'){
       let rows = await (isDbEnabled()? pgdb.getTransactions(uid) : fileStore.getTransactions(uid));
@@ -432,6 +450,32 @@ async function callToolByName(name, args, uid){
       setTimeout(async ()=>{ try{ const cats = await (isDbEnabled()? pgdb.getCategories() : fileStore.getCategories(uid)); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
       return { ok:true, transaction: rec };
     }
+    if(name==='update_transaction'){
+      const rows = await loadTx();
+      const id = args?.id || '';
+      const target = id ? rows.find(t=> t.id===id) : pickBestTx(rows, args?.criteria||{});
+      if(!target) return { ok:false, error:'not_found' };
+      const patch = args?.patch||{};
+      const rec = await (isDbEnabled()? pgdb.updateTransaction(uid, target.id, patch) : fileStore.updateTransaction(uid, target.id, patch));
+      if(!rec) return { ok:false, error:'update_failed' };
+      setTimeout(async ()=>{ try{ const cats = await loadCats(); await upsertTxVector(uid, rec, cats); }catch(_){ } }, 0);
+      return { ok:true, transaction: rec };
+    }
+    if(name==='delete_transaction'){
+      const rows = await loadTx();
+      const id = args?.id || '';
+      const target = id ? rows.find(t=> t.id===id) : pickBestTx(rows, args?.criteria||{});
+      if(!target) return { ok:false, error:'not_found' };
+      if(isDbEnabled()) await pgdb.deleteTransaction(uid, target.id); else fileStore.deleteTransaction(uid, target.id);
+      setTimeout(()=>{ try{ deleteTxEmbeddingFile(uid, target.id); }catch(_){ } }, 0);
+      return { ok:true };
+    }
+    if(name==='mark_claimed'){
+      const id = String(args?.id||''); if(!id) return { ok:false, error:'id_required' };
+      const patch = { claimed: !!args?.claimed }; if(Number.isFinite(Number(args?.claimAmount))) patch.claimAmount = Number(args.claimAmount);
+      const rec = await (isDbEnabled()? pgdb.updateTransaction(uid, id, patch) : fileStore.updateTransaction(uid, id, patch));
+      return { ok: !!rec, transaction: rec };
+    }
     if(name==='get_notes'){
       let rows = await (isDbEnabled()? pgdb.getNotes(uid) : getNotes(uid));
       if(args?.q){ const q=String(args.q).toLowerCase(); rows = rows.filter(n=> (n.title||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)); }
@@ -443,6 +487,29 @@ async function callToolByName(name, args, uid){
       const rec = await (isDbEnabled()? pgdb.addNote(uid, payload) : (function(){ const rows=getNotes(uid); const rec={ id: safeId(), ...payload, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() }; rows.unshift(rec); setNotes(uid, rows); return rec; })());
       setTimeout(()=>{ upsertNoteVector(uid, rec); }, 0);
       return { ok:true, note: rec };
+    }
+    if(name==='list_reminders'){
+      let rows = await loadReminders();
+      if(typeof args?.done==='boolean'){ rows = rows.filter(r=> !!r.done === !!args.done); }
+      rows = rows.slice(0, Math.min(200, Number(args?.top)||50));
+      return { ok:true, rows };
+    }
+    if(name==='add_reminder'){
+      const payload = { title:String(args.title||'').trim(), dueAt: String(args.dueAt||''), repeat: ['none','daily','weekly','monthly'].includes(String(args.repeat))?String(args.repeat):'none', weekdays: Array.isArray(args.weekdays)? args.weekdays.map(n=> Number(n)|0).filter(n=> n>=0&&n<=6).slice(0,7):[], monthDay: Number.isFinite(Number(args.monthDay))? Number(args.monthDay):undefined, priority: ['low','medium','high'].includes(String(args.priority))?String(args.priority):'medium', tags: Array.isArray(args.tags)? args.tags.slice(0,20).map(x=> String(x).slice(0,24)) : [], note: String(args.note||'') };
+      if(!payload.title) return { ok:false, error:'title_required' };
+      const rec = await (isDbEnabled()? pgdb.addReminder(uid, payload) : (function(){ const rows=getReminders(uid); const r={ id:safeId(), ...payload, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), done:false }; rows.unshift(r); setReminders(uid, rows); return r; })());
+      return { ok:true, reminder: rec };
+    }
+    if(name==='update_reminder'){
+      const id = String(args?.id||''); if(!id) return { ok:false, error:'id_required' };
+      const patch = args?.patch||{};
+      const rec = await (isDbEnabled()? pgdb.updateReminder(uid, id, patch) : (function(){ const rows=getReminders(uid); const idx=rows.findIndex(r=> r.id===id); if(idx<0) return null; const next={ ...rows[idx], ...patch, updatedAt:new Date().toISOString() }; rows[idx]=next; setReminders(uid, rows); return next; })());
+      return { ok: !!rec, reminder: rec };
+    }
+    if(name==='delete_reminder'){
+      const id = String(args?.id||''); if(!id) return { ok:false, error:'id_required' };
+      if(isDbEnabled()) await pgdb.deleteReminder(uid, id); else { const rows=getReminders(uid).filter(r=> r.id!==id); setReminders(uid, rows); }
+      return { ok:true };
     }
     if(name==='get_stats'){
       const month = String(args?.month||'').slice(0,7);
