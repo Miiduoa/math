@@ -254,7 +254,18 @@ function getGeminiModelStruct(){ return String(process.env.GEMINI_MODEL_STRUCT||
 function getGeminiFallbackModels(kind){
   const prim = kind==='struct' ? getGeminiModelStruct() : getGeminiModelChat();
   const envList = String(kind==='struct'? (process.env.GEMINI_FALLBACK_STRUCT||'') : (process.env.GEMINI_FALLBACK_CHAT||'')).split(',').map(s=>s.trim()).filter(Boolean);
-  const defaults = uniq([ prim, `${prim}-latest`, 'gemini-1.5-pro', 'gemini-1.5-pro-latest', 'gemini-1.5-flash', 'gemini-1.5-flash-latest' ]);
+  // Include 2.0-flash family first (較容易可用)、再回退到 1.5 系列與指定 prim
+  const defaults = uniq([
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-latest',
+    'gemini-2.0-flash-8b',
+    prim,
+    `${prim}-latest`,
+    'gemini-1.5-pro',
+    'gemini-1.5-pro-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest'
+  ]);
   return envList.length? uniq([ ...envList, ...defaults ]) : defaults;
 }
 function geminiHost(){ return 'generativelanguage.googleapis.com'; }
