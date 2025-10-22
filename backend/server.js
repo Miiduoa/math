@@ -179,6 +179,28 @@ function getOpenAIBase(){
   const base = String(raw).replace(/\/+$/,'');
   return /\/v\d+(?:$|\/)/.test(base)? base: `${base}/v1`;
 }
+function normalizeOpenAIBase(urlLike){
+  const raw = String(urlLike||'').trim();
+  if(!raw) return '';
+  const base = raw.replace(/\/+$/,'');
+  return /\/v\d+(?:$|\/)/.test(base)? base: `${base}/v1`;
+}
+function uniq(arr){ const seen=new Set(); const out=[]; for(const x of arr){ if(!x) continue; const k=String(x); if(!seen.has(k)){ seen.add(k); out.push(k); } } return out; }
+function getOpenAIBases(){
+  const list = [];
+  // primary
+  list.push(getOpenAIBase());
+  // explicit alternate
+  const alt = process.env.OPENAI_ALT_BASE_URL || process.env.OPENAI_API_ALT_BASE || '';
+  if(alt) list.push(normalizeOpenAIBase(alt));
+  // chatanywhere host swap (org <-> tech)
+  try{
+    const cur = list[0]||'';
+    if(/api\.chatanywhere\.org\//.test(cur)) list.push('https://api.chatanywhere.tech/v1');
+    if(/api\.chatanywhere\.tech\//.test(cur)) list.push('https://api.chatanywhere.org/v1');
+  }catch(_){ }
+  return uniq(list.filter(Boolean));
+}
 async function createEmbedding(input){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const base = getOpenAIBase();
@@ -2326,9 +2348,7 @@ const server = http.createServer(async (req, res) => {
           const tools = buildToolsSpec(); if(tools && tools.length>0){ payloadBase.tools = tools; payloadBase.tool_choice = 'auto'; }
         }
       }
-      const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
-      const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
-      const endpoint = `${apiBase}/chat/completions`;
+      const baseCandidates = getOpenAIBases();
       function fallbackList(){
         if(mode==='struct'){
           const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-5-nano');
@@ -2344,7 +2364,8 @@ const server = http.createServer(async (req, res) => {
           return Array.from(new Set(l.filter(Boolean)));
         }
       }
-      async function tryModelsWithTools(){
+      async function tryModelsWithTools(apiBase){
+        const endpoint = `${apiBase}/chat/completions`;
         const models = fallbackList();
         let lastErr = null;
         for(const mdl of models){
@@ -2397,7 +2418,13 @@ const server = http.createServer(async (req, res) => {
         throw lastErr || new Error('all_models_failed');
       }
       try{
-        const reply = await tryModelsWithTools();
+        let reply = '';
+        let lastErr = null;
+        for(const apiBase of baseCandidates){
+          try{ reply = await tryModelsWithTools(apiBase); break; }
+          catch(err){ lastErr = err; continue; }
+        }
+        if(!reply){ throw lastErr || new Error('all_bases_failed'); }
         // struct 模式：嘗試解析 JSON
         if(mode==='struct'){
           try{
@@ -2490,9 +2517,10 @@ const server = http.createServer(async (req, res) => {
 
       // Upstream OpenAI-compatible streaming
       try{
-        const base = (OPENAI_BASE_URL||'').replace(/\/+$/,'');
-        const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
-        const endpoint = new URL(`${apiBase}/chat/completions`);
+        const baseCandidates = getOpenAIBases();
+        let started = false;
+        let lastErr = null;
+        function makeEndpoint(apiBase){ return new URL(`${apiBase}/chat/completions`); }
         // Build lightweight retrieval for streaming as well
         async function buildRagForStream(){
           try{
@@ -2543,51 +2571,53 @@ const server = http.createServer(async (req, res) => {
           const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini','gpt-4o-mini','gpt-5-mini'];
           return (envList.length? envList : defaults).filter(Boolean);
         })();
-        let started = false;
-        for(const mdl of models){
-          try{
-            const payload = makePayload(mdl);
-            const reqUp = https.request({
-              hostname: endpoint.hostname,
-              path: endpoint.pathname + endpoint.search,
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-              }
-            }, (resp)=>{
-              if(resp.statusCode && resp.statusCode>=400){
-                try{ sse({ error:'upstream_status_'+resp.statusCode }); }catch(_){ }
-                return;
-              }
-              started = true;
-              resp.setEncoding('utf8');
-              let buffer = '';
-              resp.on('data', (chunk)=>{
-                buffer += chunk;
-                const lines = buffer.split(/\n/);
-                buffer = lines.pop()||'';
-                for(const line of lines){
-                  const trimmed = line.trim();
-                  if(!trimmed) continue;
-                  if(trimmed.startsWith('data:')){
-                    const data = trimmed.slice(5).trim();
-                    if(data === '[DONE]'){ sse({ done:true }); return; }
-                    try{
-                      const json = JSON.parse(data);
-                      const delta = json?.choices?.[0]?.delta?.content || '';
-                      if(delta){ sse({ delta }); }
-                    }catch(_){ /* ignore */ }
-                  }
+        outer: for(const apiBase of baseCandidates){
+          const endpoint = makeEndpoint(apiBase);
+          for(const mdl of models){
+            try{
+              const payload = makePayload(mdl);
+              const reqUp = https.request({
+                hostname: endpoint.hostname,
+                path: endpoint.pathname + endpoint.search,
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                  'Content-Type': 'application/json'
                 }
+              }, (resp)=>{
+                if(resp.statusCode && resp.statusCode>=400){
+                  try{ sse({ error:'upstream_status_'+resp.statusCode }); }catch(_){ }
+                  return;
+                }
+                started = true;
+                resp.setEncoding('utf8');
+                let buffer = '';
+                resp.on('data', (chunk)=>{
+                  buffer += chunk;
+                  const lines = buffer.split(/\n/);
+                  buffer = lines.pop()||'';
+                  for(const line of lines){
+                    const trimmed = line.trim();
+                    if(!trimmed) continue;
+                    if(trimmed.startsWith('data:')){
+                      const data = trimmed.slice(5).trim();
+                      if(data === '[DONE]'){ sse({ done:true }); return; }
+                      try{
+                        const json = JSON.parse(data);
+                        const delta = json?.choices?.[0]?.delta?.content || '';
+                        if(delta){ sse({ delta }); }
+                      }catch(_){ /* ignore */ }
+                    }
+                  }
+                });
+                resp.on('end', ()=>{ try{ sse({ done:true }); }catch(_){ } });
               });
-              resp.on('end', ()=>{ try{ sse({ done:true }); }catch(_){ } });
-            });
-            reqUp.on('error', ()=>{ /* try next */ });
-            reqUp.write(JSON.stringify(payload));
-            reqUp.end();
-            if(started) break;
-          }catch(_){ /* try next */ }
+              reqUp.on('error', (e)=>{ lastErr = e; /* try next */ });
+              reqUp.write(JSON.stringify(payload));
+              reqUp.end();
+              if(started) break outer;
+            }catch(e){ lastErr = e; /* try next */ }
+          }
         }
         if(!started){ try{ sse({ error:'upstream_error_all' }); }catch(_){ } }
       }catch(_){ try{ sse({ error:'stream_init_failed' }); }catch(_){ } }
