@@ -2879,6 +2879,41 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(r));
     }
 
+    // Google Gemini diagnostic: call generateContent and embedContent and return status + snippets
+    if (req.method === 'GET' && reqPath === '/api/ai/diag_gemini'){
+      if(!isGeminiEnabled()){
+        res.writeHead(400, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:'no_gemini_key' }));
+      }
+      try{
+        const chatModel = getGeminiModelChat();
+        const structModel = getGeminiModelStruct();
+        const sys = 'You are a helpful assistant. Answer in Traditional Chinese.';
+        const chat = await geminiRequest(`/v1beta/models/${encodeURIComponent(chatModel)}:generateContent`, {
+          contents: toGeminiContents([ { role:'user', content:'ping' } ]),
+          systemInstruction: { parts:[ { text: sys } ] },
+          generationConfig: { temperature: 0 }
+        });
+        const chatText = String(chat?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'');
+        const struct = await geminiRequest(`/v1beta/models/${encodeURIComponent(structModel)}:generateContent`, {
+          contents: toGeminiContents([ { role:'user', content:'支出 100 早餐 2025-01-02' } ]),
+          systemInstruction: { parts:[ { text: '請輸出 JSON：{"type":"expense","amount":number}' } ] },
+          generationConfig: { temperature: 0, responseMimeType:'application/json' }
+        });
+        let structParsed=null; try{ structParsed = JSON.parse(String(struct?.json?.candidates?.[0]?.content?.parts?.[0]?.text||'')); }catch(_){ }
+        const emb = await geminiRequest(`/v1beta/models/${encodeURIComponent(String(process.env.GEMINI_EMBEDDING_MODEL||'text-embedding-004'))}:embedContent`, {
+          content: { parts:[ { text:'hello' } ] }
+        });
+        const dim = Array.isArray(emb?.json?.embedding?.values) ? emb.json.embedding.values.length : 0;
+        const ok = Boolean(chatText || structParsed);
+        res.writeHead(ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok, chat:{ status:chat?.status||0, text:chatText }, struct:{ status:struct?.status||0, parsed:Boolean(structParsed), sample:structParsed }, embeddings:{ status:emb?.status||0, dim } }));
+      }catch(err){
+        res.writeHead(502, { 'Content-Type':'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok:false, error:String(err&&err.message||err) }));
+      }
+    }
+
     // Admin: view effective config/toggles
     if (req.method === 'GET' && reqPath === '/api/admin/config'){
       const ADMIN_KEY = process.env.ADMIN_KEY || '';
