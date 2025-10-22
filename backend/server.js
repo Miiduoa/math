@@ -166,7 +166,11 @@ function listNoteEmbeddingsFile(userId){ const v=getVectorsFile(userId); return 
 function listTxEmbeddingsFile(userId){ const v=getVectorsFile(userId); return Object.entries(v.txs||{}).map(([id,embedding])=>({id, embedding})); }
 
 // Embedding helpers
-function getOpenAIBase(){ const base=(process.env.OPENAI_BASE_URL||'https://api.openai.com/v1').replace(/\/+$/,''); return /\/v\d+(?:$|\/)/.test(base)? base: `${base}/v1`; }
+function getOpenAIBase(){
+  const raw = (process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1');
+  const base = String(raw).replace(/\/+$/,'');
+  return /\/v\d+(?:$|\/)/.test(base)? base: `${base}/v1`;
+}
 async function createEmbedding(input){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const base = getOpenAIBase();
@@ -410,7 +414,11 @@ function buildToolsSpec(){
     { type:'function', function:{ name:'list_reminders', description:'查詢提醒事項', parameters:{ type:'object', properties:{ top:{type:'number'}, done:{type:'boolean'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'add_reminder', description:'新增提醒事項', parameters:{ type:'object', properties:{ title:{type:'string'}, dueAt:{type:'string'}, repeat:{type:'string', enum:['none','daily','weekly','monthly']}, weekdays:{type:'array', items:{type:'number'}}, monthDay:{type:'number'}, priority:{type:'string', enum:['low','medium','high']}, tags:{type:'array', items:{type:'string'}}, note:{type:'string'} }, required:['title'], additionalProperties:false } } },
     { type:'function', function:{ name:'update_reminder', description:'更新提醒事項', parameters:{ type:'object', properties:{ id:{type:'string'}, patch:{ type:'object', properties:{ title:{type:'string'}, dueAt:{type:'string'}, repeat:{type:'string', enum:['none','daily','weekly','monthly']}, weekdays:{type:'array', items:{type:'number'}}, monthDay:{type:'number'}, priority:{type:'string', enum:['low','medium','high']}, tags:{type:'array', items:{type:'string'}}, note:{type:'string'}, done:{type:'boolean'} }, additionalProperties:false } }, required:['id','patch'], additionalProperties:false } } },
-    { type:'function', function:{ name:'delete_reminder', description:'刪除提醒事項', parameters:{ type:'object', properties:{ id:{type:'string'} }, required:['id'], additionalProperties:false } } }
+    { type:'function', function:{ name:'delete_reminder', description:'刪除提醒事項', parameters:{ type:'object', properties:{ id:{type:'string'} }, required:['id'], additionalProperties:false } } },
+    { type:'function', function:{ name:'add_by_receipt', description:'從收據圖片新增交易', parameters:{ type:'object', properties:{ imageUrl:{type:'string'}, note:{type:'string'}, date:{type:'string'} }, required:['imageUrl'], additionalProperties:false } } },
+    { type:'function', function:{ name:'batch_mark_claimed', description:'批次標記請款狀態', parameters:{ type:'object', properties:{ criteria:{ type:'object', properties:{ since:{type:'string'}, until:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, noteContains:{type:'string'} }, additionalProperties:false }, claimed:{type:'boolean'}, claimAmount:{type:'number'} }, required:['claimed'], additionalProperties:false } } },
+    { type:'function', function:{ name:'category_rename', description:'重新命名分類', parameters:{ type:'object', properties:{ idOrName:{type:'string'}, newName:{type:'string'} }, required:['idOrName','newName'], additionalProperties:false } } },
+    { type:'function', function:{ name:'category_merge', description:'合併分類（from 併入 to）', parameters:{ type:'object', properties:{ fromIdOrName:{type:'string'}, toIdOrName:{type:'string'} }, required:['fromIdOrName','toIdOrName'], additionalProperties:false } } }
   ];
 }
 async function callToolByName(name, args, uid){
@@ -528,6 +536,107 @@ async function callToolByName(name, args, uid){
       for(const t of rows){ if(t.type!=='expense') continue; const v=toBase(t); byCat.set(t.categoryId,(byCat.get(t.categoryId)||0)+v); }
       const ranking = Array.from(byCat.entries()).sort((a,b)=>b[1]-a[1]).map(([id,v])=>({ categoryId:id, categoryName:catName(id), amountTWD:v }));
       return { ok:true, stats:{ incomeTWD:income, expenseTWD:expense, netTWD:net, unclaimedCount:unclaimed.length, unclaimedTWD:unclaimedSum, ranking } };
+    }
+    if(name==='add_by_receipt'){
+      const imageUrl = String(args?.imageUrl||'').trim();
+      if(!imageUrl) return { ok:false, error:'image_required' };
+      // 1) Vision：提取文字
+      const vis = await aiResponsesVision('請從這張收據中提取最可能的一筆消費，並以可讀文字輸出：日期、金額、幣別（若無視為 TWD）、可能的分類（中文名）、備註簡述。', imageUrl);
+      const text = (vis && vis.ok && vis.output) ? String(vis.output) : '';
+      // 2) 結構化解析
+      const cats = await loadCats();
+      const parsed = await aiStructParse(text || (args?.note||''), { categories: cats });
+      let p = parsed || {};
+      if(!p || (!Number.isFinite(Number(p.amount)))){
+        // fallback NLP 快速解析
+        p = parseNlpQuick(text || (args?.note||''));
+      }
+      // 3) 補齊與建立分類
+      let catId = p.categoryId || '';
+      if(!catId && p.categoryName){
+        const hit = cats.find(c=> String(c.name).toLowerCase()===String(p.categoryName).toLowerCase());
+        if(hit) catId = hit.id; else { const created = await (isDbEnabled()? pgdb.addCategory(p.categoryName) : fileStore.addCategory(uid, p.categoryName)); if(created && created.id) catId = created.id; }
+      }
+      if(!catId){ catId = (cats[0] && cats[0].id) || 'food'; }
+      const payload = {
+        date: args?.date || p.date || new Date().toISOString().slice(0,10),
+        type: p.type || 'expense',
+        categoryId: catId,
+        currency: p.currency || 'TWD',
+        rate: Number(p.rate)||1,
+        amount: Number(p.amount)||0,
+        claimAmount: Number(p.claimAmount)||0,
+        claimed: p.claimed===true,
+        note: String(p.note||args?.note||'').slice(0,200)
+      };
+      if(isDbEnabled()){
+        const rec = await pgdb.addTransaction(uid, payload);
+        setTimeout(async ()=>{ try{ const cc = await loadCats(); await upsertTxVector(uid, rec, cc); }catch(_){ } }, 0);
+        return { ok:true, transaction: rec, visionText: text };
+      }else{
+        const rec = fileStore.addTransaction(uid, payload);
+        setTimeout(async ()=>{ try{ const cc = await loadCats(); await upsertTxVector(uid, rec, cc); }catch(_){ } }, 0);
+        return { ok:true, transaction: rec, visionText: text };
+      }
+    }
+    if(name==='batch_mark_claimed'){
+      const criteria = args?.criteria||{};
+      const claimed = !!args?.claimed;
+      const claimAmount = Number.isFinite(Number(args?.claimAmount)) ? Number(args.claimAmount) : undefined;
+      let rows = await loadTx();
+      if(criteria.type){ rows = rows.filter(t=> t.type===criteria.type); }
+      if(criteria.categoryId){ rows = rows.filter(t=> t.categoryId===criteria.categoryId); }
+      if(criteria.since){ rows = rows.filter(t=> String(t.date||'') >= String(criteria.since)); }
+      if(criteria.until){ rows = rows.filter(t=> String(t.date||'') <= String(criteria.until)); }
+      if(criteria.noteContains){ const q=String(criteria.noteContains).toLowerCase(); rows = rows.filter(t=> String(t.note||'').toLowerCase().includes(q)); }
+      let count=0; for(const t of rows){ const patch={ claimed }; if(Number.isFinite(claimAmount)) patch.claimAmount=claimAmount; const r= await (isDbEnabled()? pgdb.updateTransaction(uid, t.id, patch) : fileStore.updateTransaction(uid, t.id, patch)); if(r) count++; }
+      return { ok:true, updated: count };
+    }
+    if(name==='category_rename'){
+      const idOrName = String(args?.idOrName||'').trim();
+      const newName = String(args?.newName||'').trim();
+      if(!idOrName || !newName) return { ok:false, error:'invalid_args' };
+      if(isDbEnabled()){
+        // resolve id
+        const cats = await loadCats();
+        const hit = cats.find(c=> c.id===idOrName || String(c.name).toLowerCase()===idOrName.toLowerCase());
+        if(!hit) return { ok:false, error:'not_found' };
+        const r = await pgdb.renameCategory(hit.id, newName);
+        return { ok: !!r, category: r };
+      }else{
+        const cats = fileStore.getCategories(uid);
+        const idx = cats.findIndex(c=> c.id===idOrName || String(c.name).toLowerCase()===idOrName.toLowerCase());
+        if(idx<0) return { ok:false, error:'not_found' };
+        cats[idx] = { ...cats[idx], name: newName };
+        writeJson(require('path').join(userDirFor(uid), 'categories.json'), cats);
+        return { ok:true, category: cats[idx] };
+      }
+    }
+    if(name==='category_merge'){
+      const from = String(args?.fromIdOrName||'').trim();
+      const toRaw = String(args?.toIdOrName||'').trim();
+      if(!from || !toRaw) return { ok:false, error:'invalid_args' };
+      const cats = await loadCats();
+      const fromHit = cats.find(c=> c.id===from || String(c.name).toLowerCase()===from.toLowerCase());
+      let toHit = cats.find(c=> c.id===toRaw || String(c.name).toLowerCase()===toRaw.toLowerCase());
+      let toId = toHit?.id || toRaw.toLowerCase().replace(/\s+/g,'-');
+      if(isDbEnabled()){
+        if(!toHit){ await pgdb.addCategory(toRaw); const newCats=await loadCats(); toHit=newCats.find(c=> c.id===toId || String(c.name).toLowerCase()===toRaw.toLowerCase()); toId = toHit?.id || toId; }
+        if(!fromHit) return { ok:false, error:'from_not_found' };
+        await pgdb.mergeCategory(uid, fromHit.id, toId);
+        return { ok:true };
+      }else{
+        // ensure target exists
+        if(!toHit){ toHit = fileStore.addCategory(uid, toRaw); toId = toHit?.id || toId; }
+        if(!fromHit) return { ok:false, error:'from_not_found' };
+        // update transactions
+        const txs = fileStore.getTransactions(uid).map(t=> t.categoryId===fromHit.id ? { ...t, categoryId: toId } : t);
+        writeJson(require('path').join(userDirFor(uid), 'transactions.json'), txs);
+        // delete old category if unused
+        const used = txs.some(t=> t.categoryId===fromHit.id);
+        if(!used){ const nextCats = fileStore.getCategories(uid).filter(c=> c.id!==fromHit.id); writeJson(require('path').join(userDirFor(uid), 'categories.json'), nextCats); }
+        return { ok:true };
+      }
     }
     if(name==='budget_delta'){
       const month = String(args?.month||'').slice(0,7) || (new Date().toISOString().slice(0,7));
@@ -1597,7 +1706,7 @@ function validateAndNormalizeStruct(input){
 
 async function aiStructParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
   const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
   if(!OPENAI_API_KEY){ return null; }
   const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
@@ -1634,7 +1743,7 @@ ${categoriesHint}
 async function aiChatText(userText, context){
   try{
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-    const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
     const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
     if(!OPENAI_API_KEY){
       return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
@@ -1668,7 +1777,7 @@ function getOpenAIClient(){
   try{
     const apiKey = process.env.OPENAI_API_KEY || '';
     if(!apiKey) return null;
-    const baseURL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/,'');
+    const baseURL = (process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/+$/,'');
     const mod = require('openai');
     const OpenAI = mod.default || mod.OpenAI || mod;
     return new OpenAI({ apiKey, baseURL });
@@ -1810,7 +1919,7 @@ async function aiAgentsTriage(userText){
 
 async function aiOpsParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
   const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
   if(!OPENAI_API_KEY){ return null; }
   const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
@@ -2085,7 +2194,7 @@ const server = http.createServer(async (req, res) => {
       const { messages = [], context = {}, mode = 'chat' } = body || {};
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
       const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
       const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
@@ -2169,14 +2278,15 @@ const server = http.createServer(async (req, res) => {
       function fallbackList(){
         if(mode==='struct'){
           const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-5-nano');
+          const envList = (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean);
           const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-nano', 'gpt-3.5-turbo'];
-          const l = OPENAI_FALLBACK_STRUCT.length? OPENAI_FALLBACK_STRUCT : defaults;
-          // ensure unique
+          const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }else{
           const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini');
+          const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
           const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-mini', 'gpt-5-nano', 'gpt-3.5-turbo'];
-          const l = OPENAI_FALLBACK_CHAT.length? OPENAI_FALLBACK_CHAT : defaults;
+          const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }
       }
@@ -2270,7 +2380,7 @@ const server = http.createServer(async (req, res) => {
       const { messages = [], context = {} } = body || {};
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
       const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
       // Prepare SSE response
@@ -2344,7 +2454,11 @@ const server = http.createServer(async (req, res) => {
           stream: true,
           ...(tools && tools.length>0 ? { tools, tool_choice:'auto' } : {})
         });
-        const models = (OPENAI_FALLBACK_CHAT.length? OPENAI_FALLBACK_CHAT : [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini','gpt-4o-mini','gpt-5-mini']).filter(Boolean);
+        const models = (function(){
+          const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
+          const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini','gpt-4o-mini','gpt-5-mini'];
+          return (envList.length? envList : defaults).filter(Boolean);
+        })();
         let started = false;
         for(const mdl of models){
           try{
@@ -2498,6 +2612,34 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok:true, admin }));
     }
 
+    // AI self-test endpoint: validate provider/base/key and pipelines
+    if (req.method === 'GET' && reqPath === '/api/ai/selftest'){
+      const out = {
+        ok:true,
+        env:{ base: (function(){ const raw=(process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'); const b=String(raw).replace(/\/+$/,''); return /\/v\d+(?:$|\/)/.test(b)?b:`${b}/v1`; })(), hasKey: !!(process.env.OPENAI_API_KEY||'').trim(), chat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'', struct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'', embedding: process.env.EMBEDDING_MODEL||'' },
+        aiStatus: { lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: OPENAI_FALLBACK_CHAT, fallbackStruct: OPENAI_FALLBACK_STRUCT },
+        tests:{ chat:null, struct:null, embeddings:null }
+      };
+      try{
+        const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:'ping' }], mode:'chat' }) }, 15000);
+        out.tests.chat = { ok: !!(j && j.ok), provider: j?.provider||'', sample: String(j?.reply||'').slice(0,64) };
+      }catch(err){ out.tests.chat = { ok:false, error:String(err?.message||err) }; }
+      try{
+        const j2 = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:'支出 100 餐飲 早餐 2025-01-02' }], mode:'struct' }) }, 15000);
+        out.tests.struct = { ok: !!(j2 && j2.ok && j2.parsed), parsed: j2?.parsed||null };
+      }catch(err){ out.tests.struct = { ok:false, error:String(err?.message||err) }; }
+      try{
+        if((process.env.OPENAI_API_KEY||'').trim()){
+          const base = (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1').replace(/\/+$/,'');
+          const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
+          const r = await fetchJson(`${apiBase}/embeddings`,{ method:'POST', headers:{ 'Authorization':`Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type':'application/json' }, body: JSON.stringify({ model: process.env.EMBEDDING_MODEL||'text-embedding-3-small', input:'hello' }) }, 12000);
+          out.tests.embeddings = { ok: !!(r && r.data && r.data[0] && Array.isArray(r.data[0].embedding)), dim: (r?.data?.[0]?.embedding||[]).length };
+        } else { out.tests.embeddings = { ok:false, error:'no_api_key' }; }
+      }catch(err){ out.tests.embeddings = { ok:false, error:String(err?.message||err) }; }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(out));
+    }
+
     // Admin: view effective config/toggles
     if (req.method === 'GET' && reqPath === '/api/admin/config'){
       const ADMIN_KEY = process.env.ADMIN_KEY || '';
@@ -2522,10 +2664,10 @@ const server = http.createServer(async (req, res) => {
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
-        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1' },
+        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1') },
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
-        aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: OPENAI_FALLBACK_CHAT, fallbackStruct: OPENAI_FALLBACK_STRUCT }
+        aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean), fallbackStruct: (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean) }
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));
@@ -2597,6 +2739,14 @@ const server = http.createServer(async (req, res) => {
       if(Object.prototype.hasOwnProperty.call(body, 'openaiBaseUrl')){
         const v = body.openaiBaseUrl;
         process.env.OPENAI_BASE_URL = (v==null) ? '' : String(v);
+        // Keep OPENAI_API_BASE in sync for compatibility
+        process.env.OPENAI_API_BASE = process.env.OPENAI_BASE_URL;
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'openaiApiBase')){
+        const v = body.openaiApiBase;
+        process.env.OPENAI_API_BASE = (v==null) ? '' : String(v);
+        // Keep OPENAI_BASE_URL in sync for compatibility
+        process.env.OPENAI_BASE_URL = process.env.OPENAI_API_BASE;
       }
       if(Object.prototype.hasOwnProperty.call(body, 'openaiModel')){
         const v = body.openaiModel;
@@ -2610,6 +2760,13 @@ const server = http.createServer(async (req, res) => {
         const v = body.openaiModelStruct;
         process.env.OPENAI_MODEL_STRUCT = (v==null) ? '' : String(v);
       }
+      // Optional fallback chains, accept comma-separated strings
+      if(Object.prototype.hasOwnProperty.call(body, 'OPENAI_FALLBACK_CHAT')){
+        process.env.OPENAI_FALLBACK_CHAT = String(body.OPENAI_FALLBACK_CHAT==null?'':body.OPENAI_FALLBACK_CHAT);
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'OPENAI_FALLBACK_STRUCT')){
+        process.env.OPENAI_FALLBACK_STRUCT = String(body.OPENAI_FALLBACK_STRUCT==null?'':body.OPENAI_FALLBACK_STRUCT);
+      }
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
@@ -2619,7 +2776,7 @@ const server = http.createServer(async (req, res) => {
         openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini',
         openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini',
         openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-4o-mini',
-        openaiBaseUrl: process.env.OPENAI_BASE_URL||'https://api.openai.com/v1'
+        openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1')
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));

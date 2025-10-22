@@ -70,3 +70,16 @@ git push -u origin main
 - 網站「設定 → 同步伺服器位址」填入 Render 網址，例如：`https://YOUR-SERVICE.onrender.com`
 - 儲存後即可開始使用（AI 與資料皆走遠端）
 
+## 使用 ChatAnywhere（GPT_API_free）
+
+本專案已支援 OpenAI 兼容協議，可直接接上 ChatAnywhere 的免費/付費 API：
+
+- 設定環境變數（任選其一變數名）：
+  - `OPENAI_BASE_URL=https://api.chatanywhere.tech/v1`（中國內地建議）或 `https://api.chatanywhere.org/v1`
+  - 或使用 `OPENAI_API_BASE`（相容名稱）：`OPENAI_API_BASE=https://api.chatanywhere.tech/v1`
+  - `OPENAI_API_KEY=你的 ChatAnywhere Key`
+- 前端也提供「AI 管理」面板（管理者）：
+  - 可輸入 `OPENAI_API_KEY` 與 `OPENAI_BASE_URL`，點「儲存並套用」立即生效（重啟後需重新設定或改用環境變數）。
+  - 點「自動健檢」可快速檢查 Base/Key、聊天、結構化與 Embedding 是否正常。
+
+參考 ChatAnywhere 文件：https://github.com/chatanywhere/GPT_API_free

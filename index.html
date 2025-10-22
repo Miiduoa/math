@@ -236,6 +236,32 @@
         </div>
         <div id="modelInspectView" class="card" style="margin-top:8px; display:none; max-height:280px; overflow:auto"></div>
       </div>
+
+      <div id="adminAI" class="assistant" style="display:none; margin-top:12px">
+        <h3>AI 管理</h3>
+        <div class="inline" style="gap:8px">
+          <input id="adminAiApiKey" type="password" placeholder="OPENAI_API_KEY（例如：sk-... 或 ChatAnywhere 的 Key）" style="flex:1">
+        </div>
+        <div class="inline" style="gap:8px">
+          <input id="adminAiBaseUrl" type="url" placeholder="OPENAI_BASE_URL（例如：https://api.chatanywhere.org/v1）" style="flex:1">
+        </div>
+        <div class="inline" style="gap:8px; margin-top:6px">
+          <input id="adminAiModelChat" type="text" placeholder="OPENAI_MODEL_CHAT（例如：gpt-4o-mini）" style="flex:1">
+          <input id="adminAiModelStruct" type="text" placeholder="OPENAI_MODEL_STRUCT（例如：gpt-5-nano）" style="flex:1">
+        </div>
+        <div class="inline" style="gap:8px; margin-top:6px">
+          <input id="adminAiFallbackChat" type="text" placeholder="OPENAI_FALLBACK_CHAT（逗號分隔）」 style="flex:1">
+          <input id="adminAiFallbackStruct" type="text" placeholder="OPENAI_FALLBACK_STRUCT（逗號分隔）」 style="flex:1">
+        </div>
+        <div class="inline" style="gap:8px; margin-top:6px">
+          <input id="adminKeyInput" type="password" placeholder="可選：X-Admin-Key（無則需 LINE 管理者登入）" style="flex:1">
+        </div>
+        <div class="inline" style="gap:8px; margin-top:6px">
+          <button id="adminAiSaveBtn" class="primary">儲存並套用</button>
+          <button id="adminAiSelftestBtn" class="secondary">自動健檢</button>
+        </div>
+        <div id="adminAiStatus" class="card" style="margin-top:8px; display:none; max-height:280px; overflow:auto"></div>
+      </div>
       <hr style="margin:12px 0; opacity:.2">
       <div id="aiResponses" class="assistant">
         <h3>AI Responses</h3>

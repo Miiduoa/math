@@ -978,6 +978,62 @@
             }catch(_){ view.style.display='block'; view.innerHTML='<div>讀取失敗</div>'; }
           });
         }
+        // AI admin
+        const aiWrap = document.getElementById('adminAI');
+        if(isAdmin && aiWrap){
+          aiWrap.style.display = '';
+          // Prefill from /api/admin/config
+          try{
+            const cfg = await fetch('/api/admin/config').then(r=> r.ok?r.json():null).catch(()=>null);
+            if(cfg && cfg.ok){
+              document.getElementById('adminAiBaseUrl').value = cfg.env?.openaiBaseUrl || '';
+              document.getElementById('adminAiModelChat').value = cfg.env?.openaiModel || (cfg.aiStatus?.lastModelChat||'');
+              document.getElementById('adminAiModelStruct').value = cfg.aiStatus?.lastModelStruct || '';
+              document.getElementById('adminAiFallbackChat').value = (cfg.aiStatus?.fallbackChat||[]).join(',');
+              document.getElementById('adminAiFallbackStruct').value = (cfg.aiStatus?.fallbackStruct||[]).join(',');
+            }
+          }catch(_){ }
+          const saveBtn = document.getElementById('adminAiSaveBtn');
+          const testBtn = document.getElementById('adminAiSelftestBtn');
+          const statusView = document.getElementById('adminAiStatus');
+          function headersWithKey(){
+            const key = (document.getElementById('adminKeyInput')?.value||'').trim();
+            return key ? { 'X-Admin-Key': key } : {};
+          }
+          saveBtn?.addEventListener('click', async ()=>{
+            const base = document.getElementById('adminAiBaseUrl')?.value.trim();
+            const chat = document.getElementById('adminAiModelChat')?.value.trim();
+            const sModel = document.getElementById('adminAiModelStruct')?.value.trim();
+            const fbChat = document.getElementById('adminAiFallbackChat')?.value.trim();
+            const fbStruct = document.getElementById('adminAiFallbackStruct')?.value.trim();
+            const apiKey = document.getElementById('adminAiApiKey')?.value.trim();
+            const body = {};
+            if(base) body.openaiBaseUrl = base;
+            if(chat) body.openaiModelChat = chat;
+            if(sModel) body.openaiModelStruct = sModel;
+            if(fbChat) body.OPENAI_FALLBACK_CHAT = fbChat; // not recognized by toggles, but keep for future
+            if(fbStruct) body.OPENAI_FALLBACK_STRUCT = fbStruct;
+            if(apiKey) body.openaiApiKey = apiKey;
+            try{
+              const res = await fetch('/api/admin/toggles', { method:'POST', headers:{ 'Content-Type':'application/json', ...headersWithKey() }, body: JSON.stringify(body) });
+              const j = await res.json().catch(()=>({ ok:false }));
+              if(res.ok && j.ok){ alert('已套用（重啟前以運行時覆寫）'); }
+              else { alert('儲存失敗（權限或環境）'); }
+            }catch(_){ alert('儲存失敗'); }
+          });
+          testBtn?.addEventListener('click', async ()=>{
+            try{
+              const res = await fetch('/api/ai/selftest');
+              const j = await res.json().catch(()=>({ ok:false }));
+              statusView.style.display='block';
+              statusView.innerHTML = `<div><strong>Base:</strong> ${(j.env&&j.env.base)||''} ｜ <strong>HasKey:</strong> ${j.env&&j.env.hasKey}</div>
+              <div style="margin-top:6px"><strong>Chat:</strong> ${j.tests?.chat?.ok?'✅':'❌'} ${j.tests?.chat?.provider||''} ｜ <small>${(j.tests?.chat?.sample||'').replace(/[<>&]/g,'')}</small></div>
+              <div><strong>Struct:</strong> ${j.tests?.struct?.ok?'✅':'❌'} ｜ <small>${j.tests?.struct?.parsed?JSON.stringify(j.tests.struct.parsed):''}</small></div>
+              <div><strong>Embeddings:</strong> ${j.tests?.embeddings?.ok?'✅':'❌'} ${j.tests?.embeddings?.dim?`dim ${j.tests.embeddings.dim}`:''}</div>
+              <div class="muted" style="margin-top:6px"><small>lastError: ${j.aiStatus?.lastError||'-'}</small></div>`;
+            }catch(_){ statusView.style.display='block'; statusView.innerHTML='<div>健檢失敗</div>'; }
+          });
+        }
       }catch(_){ /* not admin */ }
     })();
 

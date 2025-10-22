@@ -191,6 +191,12 @@ export const db = {
     await p.query('delete from categories where id=$1', [id]);
     return true;
   },
+  async renameCategory(id, newName){
+    const p = await getPool();
+    await p.query('update categories set name=$2 where id=$1', [id, String(newName||'').trim()]);
+    const r = await p.query('select id, name from categories where id=$1', [id]);
+    return r.rows[0] || null;
+  },
   async getSettings(userId){
     const p = await getPool();
     if(userId){
@@ -277,6 +283,15 @@ export const db = {
     await p.query('delete from transactions where id=$1 and user_id=$2', [id, userId||null]);
     // cleanup embedding if exists
     try{ await p.query('delete from tx_embeddings where tx_id=$1 and user_id=$2', [id, userId||null]); }catch(_){ }
+    return true;
+  },
+  async mergeCategory(userId, fromId, toId){
+    const p = await getPool();
+    // ensure target exists
+    await p.query('insert into categories(id,name) values($1,$2) on conflict do nothing', [toId, toId]);
+    await p.query('update transactions set category_id=$3 where user_id=$1 and category_id=$2', [userId||null, fromId, toId]);
+    const used = await p.query('select 1 from transactions where category_id=$1 limit 1', [fromId]);
+    if(used.rowCount===0){ await p.query('delete from categories where id=$1', [fromId]); }
     return true;
   },
   async exportAll(userId){
@@ -516,4 +531,3 @@ export async function listTxEmbeddings(userId){
   const r = await p.query('select tx_id as id, embedding from tx_embeddings where user_id=$1', [userId||null]);
   return r.rows.map(row=> ({ id: row.id, embedding: row.embedding || [] }));
 }
-
