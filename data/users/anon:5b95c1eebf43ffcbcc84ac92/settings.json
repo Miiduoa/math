@@ -1,0 +1,9 @@
+{
+  "key": "app",
+  "baseCurrency": "TWD",
+  "monthlyBudgetTWD": 0,
+  "savingsGoalTWD": 0,
+  "nudges": true,
+  "appearance": "system",
+  "categoryBudgets": {}
+}
