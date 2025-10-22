@@ -991,6 +991,8 @@
               document.getElementById('adminAiModelStruct').value = cfg.aiStatus?.lastModelStruct || '';
               document.getElementById('adminAiFallbackChat').value = (cfg.aiStatus?.fallbackChat||[]).join(',');
               document.getElementById('adminAiFallbackStruct').value = (cfg.aiStatus?.fallbackStruct||[]).join(',');
+              try{ document.getElementById('adminAiDisableTools').checked = !(cfg.env?.aiToolsEnabled!==false); }catch(_){ }
+              try{ document.getElementById('adminAiSimpleMode').checked = !!cfg.env?.simpleChatMode; }catch(_){ }
             }
           }catch(_){ }
           const saveBtn = document.getElementById('adminAiSaveBtn');
@@ -1007,6 +1009,8 @@
             const fbChat = document.getElementById('adminAiFallbackChat')?.value.trim();
             const fbStruct = document.getElementById('adminAiFallbackStruct')?.value.trim();
             const apiKey = document.getElementById('adminAiApiKey')?.value.trim();
+            const disableTools = document.getElementById('adminAiDisableTools')?.checked;
+            const simpleMode = document.getElementById('adminAiSimpleMode')?.checked;
             const body = {};
             if(base) body.openaiBaseUrl = base;
             if(chat) body.openaiModelChat = chat;
@@ -1014,6 +1018,8 @@
             if(fbChat) body.OPENAI_FALLBACK_CHAT = fbChat; // not recognized by toggles, but keep for future
             if(fbStruct) body.OPENAI_FALLBACK_STRUCT = fbStruct;
             if(apiKey) body.openaiApiKey = apiKey;
+            body.aiToolsEnabled = !disableTools;
+            body.aiSimpleMode = !!simpleMode;
             try{
               const res = await fetch('/api/admin/toggles', { method:'POST', headers:{ 'Content-Type':'application/json', ...headersWithKey() }, body: JSON.stringify(body) });
               const j = await res.json().catch(()=>({ ok:false }));

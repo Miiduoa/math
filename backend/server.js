@@ -45,8 +45,16 @@ const runtimeToggles = {
   requireAuth: null,    // null -> use env; boolean overrides
   aiAllowAnon: null     // null -> use env; boolean overrides
 };
+// Runtime AI config overrides
+const runtimeAiConfig = {
+  toolsEnabled: null,   // null -> use env AI_TOOLS_ENABLED
+  simpleMode: null      // null -> use env SIMPLE_CHAT_MODE
+};
 function isRequireAuth(){ return runtimeToggles.requireAuth===null ? REQUIRE_AUTH : !!runtimeToggles.requireAuth; }
 function isAiAllowAnon(){ return runtimeToggles.aiAllowAnon===null ? AI_ALLOW_ANON : !!runtimeToggles.aiAllowAnon; }
+function isAiToolsEnabled(){ return runtimeAiConfig.toolsEnabled===null ? AI_TOOLS_ENABLED : !!runtimeAiConfig.toolsEnabled; }
+const SIMPLE_CHAT_MODE = String(process.env.SIMPLE_CHAT_MODE||'false').toLowerCase()==='true';
+function isSimpleChatMode(){ return runtimeAiConfig.simpleMode===null ? SIMPLE_CHAT_MODE : !!runtimeAiConfig.simpleMode; }
 // Local model trainer scheduling
 const MODEL_TRAIN_INTERVAL_MS = Number(process.env.MODEL_TRAIN_INTERVAL_MS || 300000); // default 5 min
 const MODEL_TRAIN_ON_START = String(process.env.MODEL_TRAIN_ON_START||'true').toLowerCase()==='true';
@@ -398,7 +406,7 @@ function startModelTrainer(){
 
 // AI Tools (function-calling) specifications and handlers
 function buildToolsSpec(){
-  if(!AI_TOOLS_ENABLED) return [];
+  if(!isAiToolsEnabled()) return [];
   return [
     { type:'function', function:{ name:'get_transactions', description:'查詢交易清單', parameters:{ type:'object', properties:{ since:{type:'string', description:'起始日期 YYYY-MM-DD'}, until:{type:'string', description:'結束日期 YYYY-MM-DD'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, top:{type:'number'} }, additionalProperties:false } } },
     { type:'function', function:{ name:'add_transaction', description:'新增一筆交易', parameters:{ type:'object', properties:{ date:{type:'string'}, type:{type:'string', enum:['income','expense']}, categoryId:{type:'string'}, currency:{type:'string'}, rate:{type:'number'}, amount:{type:'number'}, claimAmount:{type:'number'}, claimed:{type:'boolean'}, emotion:{type:'string'}, motivation:{type:'string'}, note:{type:'string'} }, required:['date','type','categoryId','amount'], additionalProperties:false } } },
@@ -1907,6 +1915,9 @@ async function aiResponsesStreamOnce(userText){
 
 async function aiAgentsTriage(userText){
   try{
+    if(!((process.env.OPENAI_API_KEY||'').trim())){
+      return { ok:false, output:'', error:'no_key' };
+    }
     const mod = await import('@openai/agents');
     const { Agent, run } = mod;
     const spanishAgent = new Agent({ name:'Spanish agent', instructions:'You only speak Spanish.' });
@@ -2270,7 +2281,10 @@ const server = http.createServer(async (req, res) => {
         max_tokens: (mode==='struct') ? 600 : 1000
       };
       if(mode!=='struct'){
-        const tools = buildToolsSpec(); if(tools && tools.length>0){ payloadBase.tools = tools; payloadBase.tool_choice = 'auto'; }
+        // Respect simple mode to avoid proxy incompatibilities / token pressure
+        if(!isSimpleChatMode()){
+          const tools = buildToolsSpec(); if(tools && tools.length>0){ payloadBase.tools = tools; payloadBase.tool_choice = 'auto'; }
+        }
       }
       const base = (OPENAI_BASE_URL || '').replace(/\/+$/,'');
       const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
@@ -2305,7 +2319,7 @@ const server = http.createServer(async (req, res) => {
               body: JSON.stringify(payload)
             }, 20000);
             let message = data?.choices?.[0]?.message || {};
-            if(AI_TOOLS_ENABLED && mode!=='struct' && message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length>0){
+            if(isAiToolsEnabled() && !isSimpleChatMode() && mode!=='struct' && message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length>0){
               const toolCall = message.tool_calls[0];
               const name = toolCall?.function?.name||'';
               let args = {};
@@ -2694,7 +2708,7 @@ const server = http.createServer(async (req, res) => {
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
-        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1') },
+        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'), aiToolsEnabled: isAiToolsEnabled(), simpleChatMode: isSimpleChatMode() },
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean), fallbackStruct: (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean) }
@@ -2762,6 +2776,14 @@ const server = http.createServer(async (req, res) => {
       try{ body = JSON.parse(raw.toString('utf-8')||'{}'); }catch(_){ body={}; }
       if(typeof body.requireAuth==='boolean') runtimeToggles.requireAuth = !!body.requireAuth;
       if(typeof body.aiAllowAnon==='boolean') runtimeToggles.aiAllowAnon = !!body.aiAllowAnon;
+      if(Object.prototype.hasOwnProperty.call(body, 'aiToolsEnabled')){
+        const v = body.aiToolsEnabled;
+        runtimeAiConfig.toolsEnabled = (v==null) ? null : !!v;
+      }
+      if(Object.prototype.hasOwnProperty.call(body, 'aiSimpleMode')){
+        const v = body.aiSimpleMode;
+        runtimeAiConfig.simpleMode = (v==null) ? null : !!v;
+      }
       if(Object.prototype.hasOwnProperty.call(body, 'openaiApiKey')){
         const v = body.openaiApiKey;
         process.env.OPENAI_API_KEY = (v==null) ? '' : String(v);
@@ -2806,7 +2828,9 @@ const server = http.createServer(async (req, res) => {
         openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini',
         openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini',
         openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-4o-mini',
-        openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1')
+        openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'),
+        aiToolsEnabled: isAiToolsEnabled(),
+        aiSimpleMode: isSimpleChatMode()
       };
       res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(out));
@@ -4512,8 +4536,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && reqPath === '/api/ai/agents/triage'){
       const raw = await parseBody(req);
       const { input='' } = JSON.parse(raw.toString('utf-8')||'{}');
-      const r = await aiAgentsTriage(input);
-      res.writeHead(r.ok?200:502, { 'Content-Type':'application/json; charset=utf-8' });
+      let r = await aiAgentsTriage(input);
+      if(!r.ok){
+        // Fallback to aggregator or heuristic to avoid front-end error
+        try{
+          const j = await fetchJson(`http://127.0.0.1:${PORT}/api/ai`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ messages:[{ role:'user', content:String(input||'') }], mode:'chat' }) }, 15000);
+          r = { ok:true, output: String(j?.reply||'') };
+        }catch(_){
+          const fb = heuristicReply([{ role:'user', content:String(input||'') }], {});
+          r = { ok:true, output: String(fb||'') };
+        }
+      }
+      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
       return res.end(JSON.stringify(r));
     }
 
