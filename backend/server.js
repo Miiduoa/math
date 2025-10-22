@@ -1737,7 +1737,7 @@ function validateAndNormalizeStruct(input){
 async function aiStructParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-2.5-pro';
   if(!OPENAI_API_KEY){ return null; }
   const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
   const categoriesHint = catNames.length>0 ? `有效分類（優先從此清單選擇 categoryName；對不到可輸出新的文字並由前端建立）：${catNames.join(', ')}` : '';
@@ -1774,7 +1774,7 @@ async function aiChatText(userText, context){
   try{
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
     const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-    const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-2.5-pro';
     if(!OPENAI_API_KEY){
       return heuristicReply([{ role:'user', content:String(userText||'') }], context||{});
     }
@@ -1810,7 +1810,7 @@ async function diagUpstreamChat(){
     const rawBase = (process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1');
     const base = String(rawBase).replace(/\/+$/,'');
     const apiBase = /\/v\d+(?:$|\/)/.test(base) ? base : `${base}/v1`;
-    const model = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
     if(!OPENAI_API_KEY){ return { ok:false, reason:'no_api_key', providerBase: apiBase, model }; }
     const url = new URL(`${apiBase}/chat/completions`);
     const payload = {
@@ -1856,7 +1856,7 @@ function getOpenAIClient(){
 
 async function callWithModelFallback(fn){
   const primary = process.env.OPENAI_RESP_MODEL || 'gpt-5';
-  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
+  const fallback = process.env.OPENAI_FALLBACK_MODEL || 'gemini-2.5-flash';
   try{ return await fn(primary); }catch(_){ }
   try{ return await fn(fallback); }catch(_){ }
   return { ok:false, output:'', error:'provider_error' };
@@ -1993,7 +1993,7 @@ async function aiAgentsTriage(userText){
 async function aiOpsParse(text, context){
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
   const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gemini-2.5-pro';
   if(!OPENAI_API_KEY){ return null; }
   const catNames = Array.isArray(context?.categories) ? context.categories.map(c=>String(c.name)).slice(0,100) : [];
   const categoriesHint = catNames.length>0 ? `已知分類：${catNames.join(', ')}` : '';
@@ -2268,8 +2268,8 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
-      const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
+      const OPENAI_MODEL_STRUCT = process.env.OPENAI_MODEL_STRUCT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
 
       // Fallback: simple heuristic response if no key configured
       if (!OPENAI_API_KEY) {
@@ -2351,15 +2351,15 @@ const server = http.createServer(async (req, res) => {
       const baseCandidates = getOpenAIBases();
       function fallbackList(){
         if(mode==='struct'){
-          const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-5-nano');
+          const prim = (process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-2.5-pro');
           const envList = (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-nano', 'gpt-3.5-turbo'];
+          const defaults = [prim, 'gemini-2.5-pro', 'gemini-2.5-flash', 'gpt-4o-mini'];
           const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }else{
-          const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini');
+          const prim = (process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro');
           const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [prim, 'gpt-4o-mini', 'gpt-5-mini', 'gpt-4.1-mini', 'gpt-5-nano', 'gpt-3.5-turbo'];
+          const defaults = [prim, 'gemini-2.5-pro', 'gemini-2.5-flash', 'gpt-4o-mini'];
           const l = envList.length? envList : defaults;
           return Array.from(new Set(l.filter(Boolean)));
         }
@@ -2492,7 +2492,7 @@ const server = http.createServer(async (req, res) => {
 
       const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
       const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const OPENAI_MODEL_CHAT = process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || 'gemini-2.5-pro';
 
       // Prepare SSE response
       res.writeHead(200, {
@@ -2568,7 +2568,7 @@ const server = http.createServer(async (req, res) => {
         });
         const models = (function(){
           const envList = (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean);
-          const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini','gpt-4o-mini','gpt-5-mini'];
+          const defaults = [process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro','gemini-2.5-pro','gemini-2.5-flash'];
           return (envList.length? envList : defaults).filter(Boolean);
         })();
         outer: for(const apiBase of baseCandidates){
@@ -2785,7 +2785,7 @@ const server = http.createServer(async (req, res) => {
       const hasOpenAIKey = !!(process.env.OPENAI_API_KEY||'').trim();
       const out = {
         ok:true,
-        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'), aiToolsEnabled: isAiToolsEnabled(), simpleChatMode: isSimpleChatMode() },
+        env:{ requireAuth: REQUIRE_AUTH, aiAllowAnon: AI_ALLOW_ANON, hasOpenAIKey, openaiModel: process.env.OPENAI_MODEL||'gemini-2.5-pro', openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'), aiToolsEnabled: isAiToolsEnabled(), simpleChatMode: isSimpleChatMode() },
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         aiStatus:{ lastError: runtimeAiStatus.lastError||null, lastErrorAt: runtimeAiStatus.lastErrorAt||0, lastModelChat: runtimeAiStatus.lastModelChat||null, lastModelStruct: runtimeAiStatus.lastModelStruct||null, fallbackChat: (process.env.OPENAI_FALLBACK_CHAT||'').split(',').map(s=>s.trim()).filter(Boolean), fallbackStruct: (process.env.OPENAI_FALLBACK_STRUCT||'').split(',').map(s=>s.trim()).filter(Boolean) }
@@ -2902,9 +2902,9 @@ const server = http.createServer(async (req, res) => {
         runtime:{ requireAuth: runtimeToggles.requireAuth, aiAllowAnon: runtimeToggles.aiAllowAnon },
         effective:{ requireAuth: isRequireAuth(), aiAllowAnon: isAiAllowAnon() },
         hasOpenAIKey,
-        openaiModel: process.env.OPENAI_MODEL||'gpt-4o-mini',
-        openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gpt-4o-mini',
-        openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gpt-4o-mini',
+        openaiModel: process.env.OPENAI_MODEL||'gemini-2.5-pro',
+        openaiModelChat: process.env.OPENAI_MODEL_CHAT||process.env.OPENAI_MODEL||'gemini-2.5-pro',
+        openaiModelStruct: process.env.OPENAI_MODEL_STRUCT||process.env.OPENAI_MODEL||'gemini-2.5-pro',
         openaiBaseUrl: (process.env.OPENAI_BASE_URL||process.env.OPENAI_API_BASE||'https://api.openai.com/v1'),
         aiToolsEnabled: isAiToolsEnabled(),
         aiSimpleMode: isSimpleChatMode()
