@@ -1,0 +1,13 @@
+{
+  "name": "double-entry-personal-ledger",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node cli.js sample/ledger.json",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

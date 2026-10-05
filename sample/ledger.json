@@ -1,0 +1,47 @@
+{
+  "accounts": [
+    {"id":"bank","name":"Bank","type":"asset"},
+    {"id":"card","name":"Credit Card","type":"liability"},
+    {"id":"salary","name":"Salary","type":"income"},
+    {"id":"food","name":"Food","type":"expense"},
+    {"id":"transport","name":"Transport","type":"expense"}
+  ],
+  "transactions": [
+    {
+      "id":"tx-001",
+      "date":"2026-10-01",
+      "description":"Salary",
+      "entries":[
+        {"account":"bank","debit":5000000,"credit":0},
+        {"account":"salary","debit":0,"credit":5000000}
+      ]
+    },
+    {
+      "id":"tx-002",
+      "date":"2026-10-03",
+      "description":"Lunch",
+      "entries":[
+        {"account":"food","debit":18000,"credit":0},
+        {"account":"card","debit":0,"credit":18000}
+      ]
+    },
+    {
+      "id":"tx-003",
+      "date":"2026-10-05",
+      "description":"Transit",
+      "entries":[
+        {"account":"transport","debit":12000,"credit":0},
+        {"account":"bank","debit":0,"credit":12000}
+      ]
+    },
+    {
+      "id":"tx-004",
+      "date":"2026-10-10",
+      "description":"Pay credit card",
+      "entries":[
+        {"account":"card","debit":18000,"credit":0},
+        {"account":"bank","debit":0,"credit":18000}
+      ]
+    }
+  ]
+}
